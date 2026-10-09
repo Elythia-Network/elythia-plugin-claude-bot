@@ -41,7 +41,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 			<div v-else class="_gaps_s">
 				<div :class="$style.account">
 					<img v-if="state.account.avatarUrl" :src="state.account.avatarUrl" :class="$style.avatar" alt=""/>
-					<div>
+					<div :class="$style.accountBody">
 						<div><b>{{ state.account.name || state.account.username }}</b> @{{ state.account.username }}</div>
 						<div :class="$style.note">bot: {{ state.account.isBot ? 'はい' : 'いいえ' }}</div>
 					</div>
@@ -219,36 +219,36 @@ SPDX-License-Identifier: AGPL-3.0-only
 			<template #label>使った量と概算の額</template>
 			<div class="_gaps_s">
 				<div :class="$style.note">額はtoken数 × 単価で計算した概算です。実際の請求とは異なることがあります。</div>
-				<table :class="$style.table">
-					<thead>
-						<tr><th></th><th>回数</th><th>入力</th><th>出力</th><th>キャッシュ書込</th><th>キャッシュ読込</th><th>概算の額</th></tr>
-					</thead>
-					<tbody>
-						<tr v-for="p in periods" :key="p.label">
-							<td>{{ p.label }}</td>
-							<td>{{ p.usage.calls }}</td>
-							<td>{{ p.usage.tokens.inputTokens }}</td>
-							<td>{{ p.usage.tokens.outputTokens }}</td>
-							<td>{{ p.usage.tokens.cacheCreationTokens }}</td>
-							<td>{{ p.usage.tokens.cacheReadTokens }}</td>
-							<td>{{ usd(p.usage.costUsd) }}</td>
-						</tr>
-					</tbody>
-				</table>
+				<!-- 狭い画面でもはみ出さないよう、期間を列にして項目を縦に並べる。 -->
+				<div :class="$style.scroll">
+					<table :class="$style.table">
+						<thead>
+							<tr><th></th><th v-for="p in periods" :key="p.label">{{ p.label }}</th></tr>
+						</thead>
+						<tbody>
+							<tr v-for="r in usageRows" :key="r.label">
+								<th scope="row">{{ r.label }}</th>
+								<td v-for="p in periods" :key="p.label">{{ r.value(p.usage) }}</td>
+							</tr>
+						</tbody>
+					</table>
+				</div>
 				<div v-if="state.usage.month.unpriced.length > 0" :class="$style.warn">
 					単価が未設定のモデルがあります ({{ state.usage.month.unpriced.join(', ') }})。これらはtoken数だけを数え、額に含めていません。
 				</div>
-				<table v-if="state.usage.month.byModel.length > 0" :class="$style.table">
-					<thead><tr><th>今月のモデル別</th><th>回数</th><th>token</th><th>概算の額</th></tr></thead>
-					<tbody>
-						<tr v-for="m in state.usage.month.byModel" :key="m.model">
-							<td><code>{{ m.model }}</code></td>
-							<td>{{ m.calls }}</td>
-							<td>{{ totalTokens(m.tokens) }}</td>
-							<td>{{ m.costUsd == null ? '単価が未設定' : usd(m.costUsd) }}</td>
-						</tr>
-					</tbody>
-				</table>
+				<div v-if="state.usage.month.byModel.length > 0" :class="$style.scroll">
+					<table :class="$style.table">
+						<thead><tr><th>今月のモデル別</th><th>回数</th><th>token</th><th>概算の額</th></tr></thead>
+						<tbody>
+							<tr v-for="m in state.usage.month.byModel" :key="m.model">
+								<td :class="$style.message"><code>{{ m.model }}</code></td>
+								<td>{{ m.calls }}</td>
+								<td>{{ totalTokens(m.tokens) }}</td>
+								<td>{{ m.costUsd == null ? '単価が未設定' : usd(m.costUsd) }}</td>
+							</tr>
+						</tbody>
+					</table>
+				</div>
 				<div v-if="state.usage.budget">
 					予算 {{ usd(state.usage.budget.monthlyUsd) }} − 概算 {{ usd(state.usage.budget.spentUsd) }} =
 					<b :class="state.usage.budget.warning ? $style.bad : undefined">残り {{ usd(state.usage.budget.remainingUsd) }}</b>
@@ -261,21 +261,23 @@ SPDX-License-Identifier: AGPL-3.0-only
 		<MkFolder :defaultOpen="false">
 			<template #label>単価 (USD / 100万token)</template>
 			<div class="_gaps_s">
-				<table :class="$style.table">
-					<thead><tr><th>モデル</th><th>入力</th><th>キャッシュ書込 (5分)</th><th>キャッシュ読込</th><th>出力</th></tr></thead>
-					<tbody>
-						<template v-for="p in state.prices" :key="p.model">
-							<tr>
-								<td><code>{{ p.model }}</code><span v-if="p.dated" :class="$style.note"> (日付付きのIDも)</span><span v-if="p.large" :class="$style.note"> (入力が{{ p.largeThreshold }}token以下)</span></td>
-								<td>{{ p.input }}</td><td>{{ p.cacheWrite }}</td><td>{{ p.cacheRead }}</td><td>{{ p.output }}</td>
-							</tr>
-							<tr v-if="p.large">
-								<td><code>{{ p.model }}</code><span :class="$style.note"> (入力が{{ p.largeThreshold }}tokenを超える)</span></td>
-								<td>{{ p.large.input }}</td><td>{{ p.large.cacheWrite }}</td><td>{{ p.large.cacheRead }}</td><td>{{ p.large.output }}</td>
-							</tr>
-						</template>
-					</tbody>
-				</table>
+				<div :class="$style.scroll">
+					<table :class="$style.table">
+						<thead><tr><th>モデル</th><th>入力</th><th>キャッシュ書込 (5分)</th><th>キャッシュ読込</th><th>出力</th></tr></thead>
+						<tbody>
+							<template v-for="p in state.prices" :key="p.model">
+								<tr>
+									<td :class="$style.message"><code>{{ p.model }}</code><span v-if="p.dated" :class="$style.note"> (日付付きのIDも)</span><span v-if="p.large" :class="$style.note"> (入力が{{ p.largeThreshold }}token以下)</span></td>
+									<td>{{ p.input }}</td><td>{{ p.cacheWrite }}</td><td>{{ p.cacheRead }}</td><td>{{ p.output }}</td>
+								</tr>
+								<tr v-if="p.large">
+									<td :class="$style.message"><code>{{ p.model }}</code><span :class="$style.note"> (入力が{{ p.largeThreshold }}tokenを超える)</span></td>
+									<td>{{ p.large.input }}</td><td>{{ p.large.cacheWrite }}</td><td>{{ p.large.cacheRead }}</td><td>{{ p.large.output }}</td>
+								</tr>
+							</template>
+						</tbody>
+					</table>
+				</div>
 
 				<div :class="$style.label">単価の上書き (表より優先します。「設定を保存」で保存)</div>
 				<div v-for="(o, i) in draft.priceOverrides" :key="i" :class="$style.override">
@@ -296,7 +298,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 		<MkFolder :defaultOpen="false">
 			<template #label>記録</template>
 			<template #suffix>{{ state.events.length }} 件</template>
-			<div style="overflow-x: auto;">
+			<div :class="$style.scroll">
 				<div v-if="state.events.length === 0" :class="$style.note">記録はありません。</div>
 				<table v-else :class="$style.table">
 					<thead><tr><th>日時</th><th>種類</th><th>内容</th></tr></thead>
@@ -320,7 +322,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, readAsBase64, totalTokens, usd } from './api.js';
-import type { Settings, State } from './api.js';
+import type { PeriodUsage, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
 const draft = ref<Settings | null>(null);
@@ -385,6 +387,15 @@ const periods = computed(() => state.value ? [
 	{ label: '今日', usage: state.value.usage.today },
 	{ label: '今月', usage: state.value.usage.month },
 ] : []);
+
+const usageRows = [
+	{ label: '回数', value: (u: PeriodUsage) => String(u.calls) },
+	{ label: '入力', value: (u: PeriodUsage) => String(u.tokens.inputTokens) },
+	{ label: '出力', value: (u: PeriodUsage) => String(u.tokens.outputTokens) },
+	{ label: 'キャッシュ書込', value: (u: PeriodUsage) => String(u.tokens.cacheCreationTokens) },
+	{ label: 'キャッシュ読込', value: (u: PeriodUsage) => String(u.tokens.cacheReadTokens) },
+	{ label: '概算の額', value: (u: PeriodUsage) => usd(u.costUsd) },
+];
 
 // keepDraft が true なら、編集中の設定を残す。プロフィールやアカウントの
 // 操作で、保存していない設定の変更を消さないため。
@@ -494,10 +505,12 @@ onMounted(load);
 
 .error {
 	color: var(--MI_THEME-error);
+	overflow-wrap: anywhere;
 }
 
 .warn {
 	color: var(--MI_THEME-warn);
+	overflow-wrap: anywhere;
 }
 
 .ok {
@@ -512,6 +525,12 @@ onMounted(load);
 	display: flex;
 	gap: 12px;
 	align-items: center;
+}
+
+// flex の子は既定で中身より縮まないので、空白の無い長い名前で横にはみ出さないようにする。
+.accountBody {
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 
 .avatar {
@@ -543,5 +562,10 @@ onMounted(load);
 
 .message {
 	white-space: normal !important;
+}
+
+// 表が画面の幅を超えるときは、ページ全体ではなく表の中だけを横に動かす。
+.scroll {
+	overflow-x: auto;
 }
 </style>
