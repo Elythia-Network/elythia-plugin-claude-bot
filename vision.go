@@ -275,6 +275,9 @@ func variantOf(j *fetchJob) string {
 	}
 }
 
+// fullwidthBrackets turns square brackets into full-width ones.
+var fullwidthBrackets = strings.NewReplacer("[", "［", "]", "］")
+
 // cleanAlt makes the alt text safe to put inside "[画像N: ...]".
 //
 // 角括弧は全角にする。半角のままだと、代替テキストに「] [画像2」のように
@@ -284,7 +287,7 @@ func cleanAlt(comment *string) string {
 		return ""
 	}
 	s := strings.Join(strings.Fields(*comment), " ")
-	return strings.NewReplacer("[", "［", "]", "］").Replace(s)
+	return fullwidthBrackets.Replace(s)
 }
 
 // imageSources picks what to fetch for f.
