@@ -53,6 +53,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<div :class="$style.label">自己紹介</div>
 					<textarea v-model="profileDescription" :class="$style.textarea" rows="4"></textarea>
 					<div :class="$style.note">メンションした投稿がAnthropicへ送られることを、利用者に分かるように書いてください。</div>
+					<div v-if="draft.vision.enabled" :class="$style.warn">「画像を見る」が有効なので、添付の画像も送られることを書いてください。</div>
 				</div>
 				<div>
 					<div :class="$style.label">アイコン</div>
@@ -139,6 +140,28 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<template #label>同じスレッドで返事をする回数の上限 (0で無制限)</template>
 					<template #caption>botの印が付いた相手には、この設定によらず返事をしません。</template>
 				</MkInput>
+			</div>
+		</MkFolder>
+
+		<!-- 画像を見る -->
+		<MkFolder :defaultOpen="false">
+			<template #label>画像を見る</template>
+			<template #suffix>{{ draft.vision.enabled ? '有効' : '無効' }}</template>
+			<div class="_gaps_s">
+				<MkSwitch v-model="draft.vision.enabled">添付の画像をClaudeへ送る</MkSwitch>
+				<div v-if="draft.vision.enabled" :class="$style.warn">
+					画像もAnthropic社のClaude APIへ送られます。botの自己紹介の文も書き換えてください。
+				</div>
+				<div :class="$style.note">
+					送るのは、話しかけた人も読める投稿の画像だけです。JPEG・PNG・GIF・WebPで大きすぎない画像は元の画像を、それ以外(動画や大きな画像など)はサムネイルを送ります。取れなかった画像は飛ばして返事を続け、記録に残します。画像の分だけ使うtokenが増えます。
+				</div>
+				<MkInput v-model="draft.vision.maxImages" type="number" :min="1" :max="20">
+					<template #label>1回の返事で送る画像の数の上限</template>
+					<template #caption>1〜20。取れなかった画像も数えます。</template>
+				</MkInput>
+				<MkSwitch v-model="draft.vision.includeThread">スレッドの投稿の画像も送る</MkSwitch>
+				<div :class="$style.note">オフなら、メンションされた投稿の画像だけを送ります。オンでも、文脈として送る投稿の画像に限ります。</div>
+				<MkSwitch v-model="draft.vision.includeSensitive">センシティブ指定の画像も送る</MkSwitch>
 			</div>
 		</MkFolder>
 
@@ -377,6 +400,7 @@ const kindLabels: Record<string, string> = {
 	post_error: '投稿の失敗',
 	config: '設定',
 	reaction_error: 'リアクションの失敗',
+	image: '画像',
 };
 function kindLabel(kind: string): string {
 	return kindLabels[kind] ?? kind;
