@@ -59,6 +59,12 @@ export type Settings = {
 		warnPercent: number;
 		stopWhenExhausted: boolean;
 	};
+	vision: {
+		enabled: boolean;
+		maxImages: number;
+		includeThread: boolean;
+		includeSensitive: boolean;
+	};
 	priceOverrides: PriceOverride[];
 };
 
