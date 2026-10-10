@@ -527,13 +527,18 @@ func replyPrompt(thread []noteView, note noteView, botID string, contextNotes in
 			// 見せると Claude がその形をまねて、本文にも宛先を書く (#4)。
 			body = stripLeadingMentions(body, anyMention)
 		}
-		if n.CW != nil && *n.CW != "" {
-			body = "[注意書き: " + *n.CW + "]\n" + body
+		cw := ""
+		if n.CW != nil {
+			cw = *n.CW
 		}
 		if hasImages {
-			// 本文に「[画像1: …]」と書いて、他の人の画像への言及を装えないよう
-			// にする。代替テキストと同じく全角にする。
-			body = strings.ReplaceAll(body, "[画像", "［画像")
+			// 本文や注意書きに「[画像1: …]」と書いて、他の人の画像への言及を
+			// 装えないようにする。代替テキストと同じく、角括弧をすべて全角にする。
+			// 「[画像」だけを置き換えると、間に空白などを挟んで迂回できるため。
+			body, cw = fullwidthBrackets.Replace(body), fullwidthBrackets.Replace(cw)
+		}
+		if cw != "" {
+			body = "[注意書き: " + cw + "]\n" + body
 		}
 		body += attachmentText(n, vr)
 		fmt.Fprintf(&sb, "<post author=\"%s\">\n%s\n</post>\n", promptEscaper.Replace(author), promptEscaper.Replace(body))
