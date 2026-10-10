@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -52,6 +51,9 @@ type generation struct {
 	MaxTokens int
 	// PostLimit is the longest text that can be posted (投稿の文字数の上限)。
 	PostLimit int
+	// Recipient is the person the reply is for, whose mentions at the start of
+	// the generated text are removed (#4). 定時の投稿では nil。
+	Recipient *userLite
 }
 
 // thinkingHeadroom is the room left for thinking at each effort.
@@ -123,14 +125,6 @@ func classifyAPIError(err error) string {
 	return "permanent"
 }
 
-// protectedSpan matches the parts where MFM never parses a mention: code
-// blocks, inline code and URLs.
-//
-// 本体の MFM のパーサー (internal/activitypub/mfm、mfm-js 0.26.0 と同じ) は
-// 左から読み、コードと URL を先に 1 つのまとまりとして取るので、その中の @ は
-// メンションにならない。
-var protectedSpan = regexp.MustCompile("(?s)```.*?```|`[^`\n]*`|https?://[^\\s<>\"]+")
-
 func isASCIIAlnum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
@@ -153,15 +147,16 @@ func startsIdent(r rune) bool { return isASCIIAlnum(r) || r == '_' }
 // 含まない)、直後に名前の文字が続かなければ失敗する。メールアドレス
 // (foo@bar.example) や、URL・コードの中の @ はメンションにならないので、
 // 書き換えずに残す。
+//
+// **コードや URL の中の @ も崩す (#4)。** 以前はインラインコード・コードブロック・
+// URL を本体のパーサーがメンションにしない範囲として飛ばしていたが、範囲の決め方
+// (URL に使える文字、インラインコードが止まる文字、`:https:` が絵文字コードとして
+// 先に取られる形など) を正規表現で本体に揃えきれず、飛ばした範囲の中の @ が本物の
+// メンションになる形が残った。崩すとリンクやコードの見た目に幅の無い空白が
+// 入るが、メンションは飛ばない。
 func defangMentions(text string) string {
 	var sb strings.Builder
-	last := 0
-	for _, loc := range protectedSpan.FindAllStringIndex(text, -1) {
-		defangPlain(&sb, text, last, loc[0])
-		sb.WriteString(text[loc[0]:loc[1]])
-		last = loc[1]
-	}
-	defangPlain(&sb, text, last, len(text))
+	defangPlain(&sb, text, 0, len(text))
 	return sb.String()
 }
 
@@ -308,7 +303,11 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 
 		switch msg.StopReason {
 		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
-			text := defangMentions(strings.TrimSpace(textOf(msg)))
+			text := strings.TrimSpace(textOf(msg))
+			if g.Recipient != nil {
+				text = stripLeadingMentions(text, mentionOf(*g.Recipient))
+			}
+			text = defangMentions(text)
 			if text == "" {
 				b.logEvent(ctx, "warn", eventSilenced, "返ってきた本文が空だったため、投稿しませんでした。", g.UserID, g.NoteID)
 				return "", errSilent
