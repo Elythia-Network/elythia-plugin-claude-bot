@@ -298,7 +298,7 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				b.logEvent(ctx, "error", eventAPIError, "Claude APIの呼び出しが時間内に終わらなかったため、投稿しませんでした: "+describeAPIError(err), g.UserID, g.NoteID)
 				return "", errSilent
 			}
-			if class == "permanent" && len(images) > 0 && !imagesDropped && isBadRequest(err) {
+			if class == "permanent" && len(images) > 0 && !imagesDropped && isImageRejection(err) {
 				b.logEvent(ctx, "warn", eventAPIError, "Claude APIが画像を含むリクエストを受け付けなかったため、画像を外して呼び直します: "+describeAPIError(err), g.UserID, g.NoteID)
 				images, prompt, imagesDropped = nil, g.PromptWithoutImages, true
 				retry = "Claude APIが画像を受け付けなかった"
@@ -366,10 +366,23 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 	}
 }
 
-// isBadRequest reports whether err is a 400 from Claude API.
-func isBadRequest(err error) bool {
+// isImageRejection reports whether Claude API refused the request because of
+// its images: a 400 that mentions images, or a 413 (request too large).
+//
+// 画像と関係の無い400(effortやモデルの誤りなど)で画像を外して呼び直すと、
+// 同じエラーで2回呼ぶだけになるため、本文で見分ける。
+func isImageRejection(err error) bool {
 	var apierr *anthropic.Error
-	return errors.As(err, &apierr) && apierr.StatusCode == http.StatusBadRequest
+	if !errors.As(err, &apierr) {
+		return false
+	}
+	switch apierr.StatusCode {
+	case http.StatusRequestEntityTooLarge:
+		return true
+	case http.StatusBadRequest:
+		return strings.Contains(strings.ToLower(apierr.RawJSON()), "image")
+	}
+	return false
 }
 
 // textOf joins the text blocks. 思考のブロック (thinking) は本文に入れない。
