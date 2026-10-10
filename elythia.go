@@ -54,6 +54,27 @@ type noteView struct {
 	ReplyID    *string  `json:"replyId"`
 	IsHidden   bool     `json:"isHidden"`
 	FileIDs    []string `json:"fileIds"`
+	// Files are the attachments (#6). 画像を送るときだけ使う。
+	Files []driveFile `json:"files"`
+}
+
+// driveFile is the part of Misskey's packed DriveFile the bot reads.
+//
+// 大きさと寸法はfloat64で受ける。形の違う値(小数など)が来ても投稿ごと
+// 読めなくならないようにするため。読めないと返事そのものが止まる。
+type driveFile struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Type         string  `json:"type"`
+	URL          string  `json:"url"`
+	ThumbnailURL *string `json:"thumbnailUrl"`
+	Size         float64 `json:"size"`
+	IsSensitive  bool    `json:"isSensitive"`
+	Comment      *string `json:"comment"`
+	Properties   struct {
+		Width  *float64 `json:"width"`
+		Height *float64 `json:"height"`
+	} `json:"properties"`
 }
 
 func (n noteView) text() string {

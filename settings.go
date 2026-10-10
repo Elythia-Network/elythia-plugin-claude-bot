@@ -33,6 +33,7 @@ type Settings struct {
 	Scheduled ScheduledSettings `json:"scheduled"`
 	Limits    LimitSettings     `json:"limits"`
 	Budget    BudgetSettings    `json:"budget"`
+	Vision    VisionSettings    `json:"vision"`
 
 	// PriceOverrides replaces the built-in price of a model.
 	PriceOverrides []PriceOverride `json:"priceOverrides"`
@@ -71,6 +72,20 @@ type ScheduledSettings struct {
 	IntervalMinutes int `json:"intervalMinutes"`
 }
 
+// VisionSettings controls sending attached images to the model (#6).
+type VisionSettings struct {
+	// Enabled sends images. 既定はOFF。画像も外部(Anthropic)へ送ることになり、
+	// tokenも増えるので、運営者が選んでONにする。
+	Enabled bool `json:"enabled"`
+	// MaxImages caps the images sent for one reply.
+	MaxImages int `json:"maxImages"`
+	// IncludeThread also sends the images of the ancestors. OFFなら
+	// メンションされた投稿の画像だけを送る。
+	IncludeThread bool `json:"includeThread"`
+	// IncludeSensitive also sends images marked as sensitive.
+	IncludeSensitive bool `json:"includeSensitive"`
+}
+
 // LimitSettings caps the cost. 0 means no cap.
 type LimitSettings struct {
 	PerUserPerHour int `json:"perUserPerHour"`
@@ -105,6 +120,9 @@ type PriceOverride struct {
 //
 // メンションした投稿が外部 (Anthropic) へ送られることを、話しかける前に
 // 分かるようにしておく (issue の要件 11)。
+//
+// 画像には触れていない。「画像を見る」(#6)をONにしたら、運営者が自己紹介を
+// 書き換える前提で、管理画面とREADMEで案内する。
 const DefaultDescription = "このアカウントはbotです。メンションした投稿の本文と、そのスレッドの投稿は、返事を作るためにAnthropic社のClaude APIへ送られます。"
 
 func defaultSettings() Settings {
@@ -137,6 +155,9 @@ func defaultSettings() Settings {
 		Budget: BudgetSettings{
 			WarnPercent:       20,
 			StopWhenExhausted: true,
+		},
+		Vision: VisionSettings{
+			MaxImages: 4,
 		},
 		PriceOverrides: []PriceOverride{},
 	}
@@ -190,6 +211,9 @@ const (
 	// maxTokensCap は上書きできる max_tokens の上限。ctx.HTTP() は 1 回の
 	// リクエストを 30 秒で切るので、これより大きくしても返事は届かない。
 	maxTokensCap = 32000
+	// maxVisionImages は1回の返事で送る画像の数の上限の上限。1枚ずつ取りに
+	// 行くので、多すぎると1つの通知の処理が長くなる。
+	maxVisionImages = 20
 )
 
 func oneOf(v string, allowed ...string) bool {
@@ -346,6 +370,10 @@ func (s Settings) check(maxNoteLength int) error {
 	}
 	if b.WarnPercent < 0 || b.WarnPercent > 100 {
 		return badRequest("警告を出す残りの割合は0〜100にしてください")
+	}
+
+	if s.Vision.MaxImages < 1 || s.Vision.MaxImages > maxVisionImages {
+		return badRequest("送る画像の数の上限は1〜%dにしてください", maxVisionImages)
 	}
 
 	if len(s.PriceOverrides) > 100 {

@@ -150,6 +150,8 @@ func TestRoutes_SaveSettingsValidates(t *testing.T) {
 		func(s *Settings) { s.Budget.MonthlyUSD = -1 },
 		func(s *Settings) { s.Timezone = "Mars/Olympus" },
 		func(s *Settings) { s.Reply.MaxTokens = maxTokensCap + 1 },
+		func(s *Settings) { s.Vision.MaxImages = 0 },
+		func(s *Settings) { s.Vision.MaxImages = maxVisionImages + 1 },
 		func(s *Settings) {
 			s.PriceOverrides = []PriceOverride{{Model: "x", Price: Price{Input: -1}}}
 		},

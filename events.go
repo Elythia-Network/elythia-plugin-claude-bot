@@ -17,6 +17,7 @@ const (
 	eventPostError  = "post_error"
 	eventConfig     = "config"
 	eventReactError = "reaction_error"
+	eventImage      = "image"
 )
 
 // event is one line of the admin page's log.

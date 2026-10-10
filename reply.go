@@ -190,13 +190,16 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 		if reason != "" {
 			return b.overLimit(ctx, as, s, note, prefix, reason)
 		}
+		// 下書きがある再試行ではClaudeを呼ばないので、画像もここでだけ取る。
+		vr := b.collectImages(ctx, s.Vision, note, ctxNotes, s.Reply.ContextNotes)
 		text, err = b.generate(ctx, s, generation{
 			Kind:      "reply",
 			UserID:    note.User.ID,
 			Host:      note.User.remoteHost(),
 			NoteID:    note.ID,
 			System:    s.Reply.SystemPrompt,
-			Prompt:    replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes),
+			Prompt:    replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr),
+			Images:    vr.imageList(),
 			MaxChars:  s.Reply.MaxChars,
 			MaxTokens: s.Reply.MaxTokens,
 			PostLimit: maxNote - utf8.RuneCountInString(prefix),
@@ -480,23 +483,36 @@ func countBy(notes []noteView, userID string) int {
 
 var promptEscaper = strings.NewReplacer("<", "&lt;", ">", "&gt;")
 
+// promptThread returns the ancestors replyPrompt sends.
+//
+// 送るのは返事をする投稿を含めて contextNotes 件まで。thread は往復の
+// 上限を数えるために深めに取ってあるので、新しい方を残して切る。
+func promptThread(thread []noteView, contextNotes int) []noteView {
+	keep := contextNotes - 1
+	if keep < 0 {
+		keep = 0
+	}
+	if len(thread) > keep {
+		return thread[len(thread)-keep:]
+	}
+	return thread
+}
+
 // replyPrompt renders the thread as the user message.
 //
 // スレッドは 1 つの user メッセージにまとめる。bot の過去の投稿を
 // assistant として並べると、相手の投稿が続く・bot の投稿で始まるなどで
 // 役割の交互の並びを組み直す必要があり、prefill の禁止にも触れやすい。
-func replyPrompt(thread []noteView, note noteView, botID string, contextNotes int) string {
-	// 送るのは返事をする投稿を含めて contextNotes 件まで。thread は往復の
-	// 上限を数えるために深めに取ってあるので、新しい方を残して切る。
-	ctxNotes := thread
-	if keep := contextNotes - 1; len(ctxNotes) > keep {
-		if keep < 0 {
-			keep = 0
-		}
-		ctxNotes = ctxNotes[len(ctxNotes)-keep:]
-	}
+//
+// vrは送る画像(#6)。nil(visionがOFF)なら、添付は件数だけを書く。
+func replyPrompt(thread []noteView, note noteView, botID string, contextNotes int, vr *visionResult) string {
+	ctxNotes := promptThread(thread, contextNotes)
 	var sb strings.Builder
-	sb.WriteString("以下は、あなたが参加しているスレッドの投稿を古い順に並べたものです。\n<thread>\n")
+	sb.WriteString("以下は、あなたが参加しているスレッドの投稿を古い順に並べたものです。\n")
+	if len(vr.imageList()) > 0 {
+		sb.WriteString("投稿に添付された画像は、このメッセージの先頭に「画像N」のラベルを付けて並べてあります。投稿の中の[画像N]がその画像です。\n")
+	}
+	sb.WriteString("<thread>\n")
 	for _, n := range append(append([]noteView{}, ctxNotes...), note) {
 		author := n.User.acct()
 		if n.User.ID == botID {
@@ -511,9 +527,7 @@ func replyPrompt(thread []noteView, note noteView, botID string, contextNotes in
 		if n.CW != nil && *n.CW != "" {
 			body = "[注意書き: " + *n.CW + "]\n" + body
 		}
-		if len(n.FileIDs) > 0 {
-			body += fmt.Sprintf("\n(添付ファイル%d件)", len(n.FileIDs))
-		}
+		body += attachmentText(n, vr)
 		fmt.Fprintf(&sb, "<post author=\"%s\">\n%s\n</post>\n", promptEscaper.Replace(author), promptEscaper.Replace(body))
 	}
 	fmt.Fprintf(&sb, "</thread>\n最後の投稿 (%s) への返事を書いてください。宛先のメンション (@名前) は書かないでください。こちらで付けます。", note.User.acct())

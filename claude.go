@@ -54,6 +54,9 @@ type generation struct {
 	// Recipient is the person the reply is for, whose mentions at the start of
 	// the generated text are removed (#4). 定時の投稿では nil。
 	Recipient *userLite
+	// Images are sent before Prompt, each after its label (#6). 無ければ
+	// 従来と同じリクエストになる。
+	Images []visionImage
 }
 
 // thinkingHeadroom is the room left for thinking at each effort.
@@ -229,6 +232,13 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 		maxTokens = autoMaxTokens(g.MaxChars, s.Effort)
 	}
 	system := g.System + lengthInstruction(g.MaxChars)
+	// 画像は「画像N」のラベルの後に置き、スレッドの文はその後にする。
+	// max_tokensで呼び直すときも同じ画像を送る。
+	content := make([]anthropic.ContentBlockParamUnion, 0, 2*len(g.Images)+1)
+	for _, im := range g.Images {
+		content = append(content, anthropic.NewTextBlock(im.Label), anthropic.NewImageBlockBase64(im.MediaType, im.Data))
+	}
+	content = append(content, anthropic.NewTextBlock(g.Prompt))
 
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt == 1 {
@@ -250,7 +260,7 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 			MaxTokens: int64(maxTokens),
 			System:    []anthropic.TextBlockParam{{Text: system}},
 			Messages: []anthropic.MessageParam{
-				anthropic.NewUserMessage(anthropic.NewTextBlock(g.Prompt)),
+				anthropic.NewUserMessage(content...),
 			},
 		}
 		if s.Effort != "" {
