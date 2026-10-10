@@ -128,12 +128,34 @@ func (b *bot) routeSaveSettings(req plugin.Request) (any, error) {
 	if err := req.Bind(&body); err != nil || len(body.Settings) == 0 || string(body.Settings) == "null" {
 		return nil, badRequest("設定を読めません")
 	}
-	// 既定値の上に重ねる。後から足した項目(visionなど)を知らない古い画面から
-	// 保存しても、その項目がゼロ値になって検証で弾かれたり、OFFの意味が
-	// 変わったりしないようにするため(#6)。
-	s := defaultSettings()
+	// 今の設定の上に重ねる。後から足した項目(visionなど)を知らない古い画面から
+	// 保存しても、その項目がゼロ値になって検証で弾かれたり、ONにしてあった
+	// ものが黙って既定値に戻ったりしないようにするため(#6)。保存したことが
+	// 無ければ、今の設定は既定値になる。
+	s, err := loadSettings(ctx, b.db())
+	if err != nil {
+		return nil, err
+	}
+	// 配列は今の値を外してから読む。encoding/jsonは配列を今の要素の上に
+	// 読むので、送られた要素に無い項目(単価の一部など)が前の要素の値のまま
+	// 残るため。送られなかった配列だけ、今の値に戻す(nullは送られた扱い)。
+	cur := s
+	s.Scheduled.Times, s.PriceOverrides = nil, nil
 	if err := json.Unmarshal(body.Settings, &s); err != nil {
 		return nil, badRequest("設定を読めません")
+	}
+	var sent struct {
+		Scheduled struct {
+			Times json.RawMessage `json:"times"`
+		} `json:"scheduled"`
+		PriceOverrides json.RawMessage `json:"priceOverrides"`
+	}
+	_ = json.Unmarshal(body.Settings, &sent) // 形は上で確かめてある
+	if sent.Scheduled.Times == nil {
+		s.Scheduled.Times = cur.Scheduled.Times
+	}
+	if sent.PriceOverrides == nil {
+		s.PriceOverrides = cur.PriceOverrides
 	}
 	if s.Scheduled.Times == nil {
 		s.Scheduled.Times = []string{}
