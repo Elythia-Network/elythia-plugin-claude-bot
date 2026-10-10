@@ -224,3 +224,39 @@ func TestRoutes_UpdateSuspendedAccount(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, statusOf(t, err))
 	assert.Contains(t, err.Error(), "凍結")
 }
+
+func TestRoutes_SaveSettingsOverDefaults(t *testing.T) {
+	e := newEnv(t)
+	r := e.h.Routes(Plugin)
+	admin := func(body string) plugintest.Request {
+		return plugintest.Request{UserID: "admin", Administrator: true, Body: body}
+	}
+
+	// visionを知らない古い画面が送る設定。
+	var old map[string]any
+	require.NoError(t, json.Unmarshal([]byte(asJSON(t, defaultSettings())), &old))
+	delete(old, "vision")
+	old["reply"].(map[string]any)["maxChars"] = 150
+	res, err := r.Call(t, "POST /admin/settings", admin(asJSON(t, map[string]any{"settings": old})))
+	require.NoError(t, err, "visionが無くても既定値で保存できる")
+	saved := res.(*stateResponse).Settings
+	assert.Equal(t, defaultSettings().Vision, saved.Vision)
+	assert.Equal(t, 150, saved.Reply.MaxChars, "送った項目は既定値より優先する")
+	got, err := loadSettings(t.Context(), e.db)
+	require.NoError(t, err)
+	assert.Equal(t, defaultSettings().Vision, got.Vision)
+
+	// 送った配列は既定値に混ざらずに置き換わる。
+	s := defaultSettings()
+	s.Scheduled.Times = []string{"07:00"}
+	s.PriceOverrides = []PriceOverride{{Model: "claude-x", Price: Price{Input: 1}}}
+	res, err = r.Call(t, "POST /admin/settings", admin(asJSON(t, map[string]any{"settings": s})))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"07:00"}, res.(*stateResponse).Settings.Scheduled.Times)
+	assert.Len(t, res.(*stateResponse).Settings.PriceOverrides, 1)
+
+	for _, body := range []string{`{}`, `{"settings":null}`, `{"settings":"x"}`} {
+		_, err := r.Call(t, "POST /admin/settings", admin(body))
+		assert.Equal(t, http.StatusBadRequest, statusOf(t, err), body)
+	}
+}

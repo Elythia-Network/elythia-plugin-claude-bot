@@ -123,12 +123,18 @@ func (b *bot) routeState(req plugin.Request) (any, error) {
 func (b *bot) routeSaveSettings(req plugin.Request) (any, error) {
 	ctx := req.Context()
 	var body struct {
-		Settings *Settings `json:"settings"`
+		Settings json.RawMessage `json:"settings"`
 	}
-	if err := req.Bind(&body); err != nil || body.Settings == nil {
+	if err := req.Bind(&body); err != nil || len(body.Settings) == 0 || string(body.Settings) == "null" {
 		return nil, badRequest("設定を読めません")
 	}
-	s := *body.Settings
+	// 既定値の上に重ねる。後から足した項目(visionなど)を知らない古い画面から
+	// 保存しても、その項目がゼロ値になって検証で弾かれたり、OFFの意味が
+	// 変わったりしないようにするため(#6)。
+	s := defaultSettings()
+	if err := json.Unmarshal(body.Settings, &s); err != nil {
+		return nil, badRequest("設定を読めません")
+	}
 	if s.Scheduled.Times == nil {
 		s.Scheduled.Times = []string{}
 	}
