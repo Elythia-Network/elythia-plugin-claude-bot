@@ -456,16 +456,42 @@ async function run(fn: () => Promise<State>, keepDraft = false) {
 	}
 }
 
+function finite(v: unknown): number {
+	const n = Number(v);
+	return Number.isFinite(n) ? n : 0;
+}
+
 function saveSettings() {
 	const d = draft.value;
 	if (!d) return;
 	d.scheduled.times = scheduledTimes.value.split(/[,\s]+/).filter(t => t !== '');
-	// MkInput の number は空欄で null になることがある。サーバーは数を求めるので 0 に寄せる。
+	// MkInputのnumberは空欄でnullやNaNになることがある。NaNはJSONでnullになり、
+	// サーバーは今の設定の上に重ねて保存するので、nullだと前の値が黙って残る。
+	// 有限でない値はすべて0に寄せる(範囲外ならサーバーの検証で弾かれる)。
+	const r = d.reply;
+	const sc = d.scheduled;
+	const l = d.limits;
+	const b = d.budget;
+	const v = d.vision;
+	r.maxChars = finite(r.maxChars);
+	r.maxTokens = finite(r.maxTokens);
+	r.contextNotes = finite(r.contextNotes);
+	r.maxRoundTrips = finite(r.maxRoundTrips);
+	v.maxImages = finite(v.maxImages);
+	sc.intervalMinutes = finite(sc.intervalMinutes);
+	sc.maxChars = finite(sc.maxChars);
+	sc.maxTokens = finite(sc.maxTokens);
+	l.perUserPerHour = finite(l.perUserPerHour);
+	l.globalPerDay = finite(l.globalPerDay);
+	l.perHostPerDay = finite(l.perHostPerDay);
+	l.monthlyTokens = finite(l.monthlyTokens);
+	b.monthlyUsd = finite(b.monthlyUsd);
+	b.warnPercent = finite(b.warnPercent);
 	for (const o of d.priceOverrides) {
-		o.input = Number(o.input) || 0;
-		o.cacheWrite = Number(o.cacheWrite) || 0;
-		o.cacheRead = Number(o.cacheRead) || 0;
-		o.output = Number(o.output) || 0;
+		o.input = finite(o.input);
+		o.cacheWrite = finite(o.cacheWrite);
+		o.cacheRead = finite(o.cacheRead);
+		o.output = finite(o.output);
 	}
 	return run(() => api<State>('admin/settings', { settings: d }));
 }
