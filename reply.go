@@ -175,7 +175,9 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 
 	maxNote := b.maxNoteLength(ctx)
 	prefix := note.User.acct() + " "
-	text := d.Text
+	// 保存した下書きも無効にし直す。古い版が保存した下書きは、今の規則で崩されて
+	// いないことがある (#4)。崩した @ の直後は幅の無い空白なので、2 回かけても変わらない。
+	text := defangMentions(d.Text)
 	if text != "" {
 		// 本文を書いたときの公開範囲より広げない。再試行の間に文脈の投稿が
 		// 消えると、計算し直した範囲は広がりうる。
@@ -198,6 +200,7 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 			MaxChars:  s.Reply.MaxChars,
 			MaxTokens: s.Reply.MaxTokens,
 			PostLimit: maxNote - utf8.RuneCountInString(prefix),
+			Recipient: &note.User,
 		})
 		if errors.Is(err, errSilent) {
 			return "silent", nil
@@ -213,6 +216,11 @@ UPDATE handled_notifications SET reply_text = $2, reply_visibility = $3, reply_l
 			ev.ID, text, scope.Visibility, scope.LocalOnly); err != nil {
 			return "", fmt.Errorf("save draft: %w", err)
 		}
+	}
+	if strings.HasPrefix(text, "```") {
+		// 宛先と同じ行に続くと、パーサーはコードブロックとして読まない (行頭で
+		// 始まるものだけを読む)。見た目を崩さないよう、宛先の後で改行する。
+		prefix = strings.TrimRight(prefix, " ") + "\n"
 	}
 	outcome, err := b.postReply(ctx, as, note, scope, prefix+text, "replied")
 	if err != nil {
@@ -495,6 +503,11 @@ func replyPrompt(thread []noteView, note noteView, botID string, contextNotes in
 			author = "あなた (" + author + ")"
 		}
 		body := n.text()
+		if n.User.ID == botID {
+			// 自分の過去の返事は、こちらで付けた宛先から始まっている。そのまま
+			// 見せると Claude がその形をまねて、本文にも宛先を書く (#4)。
+			body = stripLeadingMentions(body, anyMention)
+		}
 		if n.CW != nil && *n.CW != "" {
 			body = "[注意書き: " + *n.CW + "]\n" + body
 		}
@@ -503,6 +516,6 @@ func replyPrompt(thread []noteView, note noteView, botID string, contextNotes in
 		}
 		fmt.Fprintf(&sb, "<post author=\"%s\">\n%s\n</post>\n", promptEscaper.Replace(author), promptEscaper.Replace(body))
 	}
-	fmt.Fprintf(&sb, "</thread>\n最後の投稿 (%s) への返事を書いてください。", note.User.acct())
+	fmt.Fprintf(&sb, "</thread>\n最後の投稿 (%s) への返事を書いてください。宛先のメンション (@名前) は書かないでください。こちらで付けます。", note.User.acct())
 	return sb.String()
 }

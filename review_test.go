@@ -82,7 +82,8 @@ func TestContext_LocalOnlyAndDirectNotesOfOthersAreNotSent(t *testing.T) {
 
 func TestDefangMentions(t *testing.T) {
 	e := newEnv(t)
-	e.claude.push(message("@victim@remote.example @bob こんにちは user@example.com #tag", "end_turn", 1, 1))
+	// 頭のメンションは宛先として外す (#4) ので、途中に置いて無効にされることを見る。
+	e.claude.push(message("やあ @victim@remote.example @bob こんにちは user@example.com #tag", "end_turn", 1, 1))
 	e.api.notes["n1"] = note("n1", "alice", "alice", "", "hi", "public")
 	require.NoError(t, e.mention("x", "n1"))
 	creates := e.api.callsTo("notes/create")
@@ -110,12 +111,23 @@ func TestDefangMentions_OnlyWhatTheParserReadsAsMentions(t *testing.T) {
 		{"あ@bob", "あ@\u200bbob"},
 		{"@_bob", "@\u200b_bob"},
 		{"https://remote.example/x @bob", "https://remote.example/x @\u200bbob"},
+		// コードブロックの中も崩す (#4)。パーサーがコードブロックとして読む条件
+		// (最上位の段、行頭) を写しきれないので、守らない。
+		{"```\n@bob\n```", "```\n@\u200bbob\n```"},
+		{"<center>\n```\n@bob\n```\n</center>", "<center>\n```\n@\u200bbob\n```\n</center>"},
+		// URL やインラインコードの中も崩す (#4)。本体のパーサーがメンションにしない
+		// 範囲を正規表現で揃えきれず、範囲の中の @ が本物になる形が残ったため。
+		{"https://remote.example/@bob", "https://remote.example/@\u200bbob"},
+		{"see http://a.example/@x/y?z=@w ok", "see http://a.example/@\u200bx/y?z=@\u200bw ok"},
+		{"`@bob`", "`@\u200bbob`"},
+		{"https://a.example/あ@bob", "https://a.example/あ@\u200bbob"},
+		{"https://a.example/*@bob", "https://a.example/*@\u200bbob"},
+		{"'@https://a.example/", "'@\u200bhttps://a.example/"},
+		{":https://a.example/@bob", ":https://a.example/@\u200bbob"},
+		{"`a\u00b4 @bob`", "`a\u00b4 @\u200bbob`"},
+		{"<plain>`</plain>@bob`", "<plain>`</plain>@\u200bbob`"},
 		// メンションにならないものは触らない。
 		{"foo@bar.example", "foo@bar.example"},
-		{"https://remote.example/@bob", "https://remote.example/@bob"},
-		{"see http://a.example/@x/y?z=@w ok", "see http://a.example/@x/y?z=@w ok"},
-		{"`@bob`", "`@bob`"},
-		{"```\n@bob\n```", "```\n@bob\n```"},
 		{"@.bob @-bob @ bob", "@.bob @-bob @ bob"},
 		{"", ""},
 	}
