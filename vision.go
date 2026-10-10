@@ -53,6 +53,10 @@ const (
 // 返事を続ける。通知のworkerを長く塞がないため。テストで短くするので変数にする。
 var collectTimeout = 20 * time.Second
 
+// decodeConfig reads the format and size of an image. テストでpanicを
+// 起こすために差し替えられるようにしておく。
+var decodeConfig = image.DecodeConfig
+
 // visionMediaTypes are the formats Claude API accepts.
 var visionMediaTypes = map[string]bool{
 	"image/jpeg": true,
@@ -317,8 +321,18 @@ func (b *bot) fetchAll(ctx context.Context, jobs []*fetchJob) {
 	var wg sync.WaitGroup
 	for _, j := range jobs {
 		wg.Add(1)
+		// pctx.Goではなく素のgoにして、自分でrecoverする。pctx.Goはpanicを
+		// 記録するだけで結果を返す手段が無く、plugintestのGoはfnをその場で
+		// 呼ぶので並行にならず、並行の上限をテストで確かめられないため。外から
+		// 来たバイト列をデコーダーに渡すので、panicは回収しないとプロセスごと落ちる。
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					b.log.Error("claude-bot: 画像の取得でpanicしました", "panic", r, "fileId", j.fileID)
+					j.img, j.err = nil, &imageError{reason: "画像の読み取りで異常が起きました"}
+				}
+			}()
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
@@ -407,7 +421,7 @@ func (b *bot) fetchImage(ctx context.Context, rawURL string) (*fetchedImage, err
 	if !visionMediaTypes[mediaType] {
 		return nil, unsuitable("JPEG・PNG・GIF・WebPのどれでもない中身です(%s)", mediaType)
 	}
-	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	cfg, format, err := decodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return nil, unsuitable("画像として読めません(%s)", mediaType)
 	}

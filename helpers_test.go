@@ -111,6 +111,15 @@ type fakeClaude struct {
 	files map[string]fileReply
 	// fetched lists the URLs requested outside Claude API, in order.
 	fetched []string
+	// inflight and maxInflight count attachment requests being served at
+	// once. 並行の上限を時間ではなく数で確かめるため。
+	inflight, maxInflight int
+	// barrier holds every attachment request until this many are in flight
+	// (or barrierWait passes). 0 なら待たない。
+	barrier     int
+	barrierWait time.Duration
+	// deadlines records how long each attachment request had left.
+	deadlines map[string]time.Duration
 }
 
 // fileReply is the response to a GET for an attachment. status 0 fails the
@@ -145,6 +154,20 @@ func (f *fakeClaude) delayFile(url string, d time.Duration) {
 	f.files[url] = r
 }
 
+// concurrency returns the most attachment requests served at once.
+func (f *fakeClaude) concurrency() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxInflight
+}
+
+func (f *fakeClaude) deadlineOf(url string) (time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.deadlines[url]
+	return d, ok
+}
+
 func (f *fakeClaude) fetchedURLs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -156,7 +179,35 @@ func (f *fakeClaude) serveAttachment(req *http.Request) (*http.Response, error) 
 	url := req.URL.String()
 	f.fetched = append(f.fetched, url)
 	r, ok := f.files[url]
+	if dl, has := req.Context().Deadline(); has {
+		if f.deadlines == nil {
+			f.deadlines = map[string]time.Duration{}
+		}
+		f.deadlines[url] = time.Until(dl)
+	}
+	f.inflight++
+	if f.inflight > f.maxInflight {
+		f.maxInflight = f.inflight
+	}
+	barrier, wait := f.barrier, f.barrierWait
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inflight--
+		f.mu.Unlock()
+	}()
+	if barrier > 0 {
+		until := time.Now().Add(wait)
+		for {
+			f.mu.Lock()
+			reached := f.maxInflight >= barrier
+			f.mu.Unlock()
+			if reached || time.Now().After(until) || req.Context().Err() != nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	if !ok {
 		r = fileReply{status: http.StatusNotFound, body: []byte("not found")}
 	}
