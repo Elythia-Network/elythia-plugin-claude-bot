@@ -118,6 +118,8 @@ type fakeClaude struct {
 type fileReply struct {
 	status int
 	body   []byte
+	// delay holds the response back. 期限が先に来たら、その時点で失敗する。
+	delay time.Duration
 }
 
 // serveFile makes url return body with 200.
@@ -134,6 +136,15 @@ func (f *fakeClaude) serveFileStatus(url string, status int, body []byte) {
 	f.files[url] = fileReply{status: status, body: body}
 }
 
+// delayFile holds the response for url back by d.
+func (f *fakeClaude) delayFile(url string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.files[url]
+	r.delay = d
+	f.files[url] = r
+}
+
 func (f *fakeClaude) fetchedURLs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -148,6 +159,13 @@ func (f *fakeClaude) serveAttachment(req *http.Request) (*http.Response, error) 
 	f.mu.Unlock()
 	if !ok {
 		r = fileReply{status: http.StatusNotFound, body: []byte("not found")}
+	}
+	if r.delay > 0 {
+		select {
+		case <-time.After(r.delay):
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 	}
 	if r.status == 0 {
 		return nil, errors.New("connection refused (test)")

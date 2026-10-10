@@ -7,6 +7,7 @@ require (
 	github.com/elythia-network/elythia v0.0.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/image v0.45.0
 )
 
 require (
