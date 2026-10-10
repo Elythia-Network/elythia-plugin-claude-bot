@@ -130,7 +130,7 @@ func TestReplyPrompt_StripsTheBotsOwnLeadingMention(t *testing.T) {
 	}
 	last := noteView{ID: "n3", Text: str("@bot 元気？"), User: alice}
 
-	p := replyPrompt(thread, last, "bot", 10)
+	p := replyPrompt(thread, last, "bot", 10, nil)
 
 	assert.Contains(t, p, "\nこんにちは\n", "自分の返事の本文は宛先を外して渡す")
 	assert.NotContains(t, p, "@alice@remote.example こんにちは")

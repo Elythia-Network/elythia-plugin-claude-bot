@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -99,10 +100,64 @@ type claudeReply struct {
 }
 
 // fakeClaude answers POST /v1/messages from a queue of replies.
+//
+// 添付の画像の取得も同じ ctx.HTTP() を通るので、Claude API 以外のホストへの
+// リクエストは files から返す (#6)。
 type fakeClaude struct {
 	mu       sync.Mutex
 	replies  []claudeReply
 	requests []capturedRequest
+	// files maps a URL to its response. 無い URL は 404 を返す。
+	files map[string]fileReply
+	// fetched lists the URLs requested outside Claude API, in order.
+	fetched []string
+}
+
+// fileReply is the response to a GET for an attachment. status 0 fails the
+// round trip before any HTTP response.
+type fileReply struct {
+	status int
+	body   []byte
+}
+
+// serveFile makes url return body with 200.
+func (f *fakeClaude) serveFile(url string, body []byte) {
+	f.serveFileStatus(url, http.StatusOK, body)
+}
+
+func (f *fakeClaude) serveFileStatus(url string, status int, body []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.files == nil {
+		f.files = map[string]fileReply{}
+	}
+	f.files[url] = fileReply{status: status, body: body}
+}
+
+func (f *fakeClaude) fetchedURLs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.fetched...)
+}
+
+func (f *fakeClaude) serveAttachment(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	url := req.URL.String()
+	f.fetched = append(f.fetched, url)
+	r, ok := f.files[url]
+	f.mu.Unlock()
+	if !ok {
+		r = fileReply{status: http.StatusNotFound, body: []byte("not found")}
+	}
+	if r.status == 0 {
+		return nil, errors.New("connection refused (test)")
+	}
+	return &http.Response{
+		StatusCode: r.status,
+		Header:     http.Header{"Content-Type": []string{"application/octet-stream"}},
+		Body:       io.NopCloser(bytes.NewReader(r.body)),
+		Request:    req,
+	}, nil
 }
 
 type capturedRequest struct {
@@ -118,6 +173,9 @@ func (f *fakeClaude) push(r ...claudeReply) {
 }
 
 func (f *fakeClaude) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host != "api.anthropic.com" {
+		return f.serveAttachment(req)
+	}
 	raw, _ := io.ReadAll(req.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
