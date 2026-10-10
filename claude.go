@@ -57,6 +57,9 @@ type generation struct {
 	// Images are sent before Prompt, each after its label (#6). 無ければ
 	// 従来と同じリクエストになる。
 	Images []visionImage
+	// PromptWithoutImages is Prompt rewritten as if no image had been sent.
+	// APIが画像のせいで400を返したときに、画像を外して呼び直すのに使う。
+	PromptWithoutImages string
 }
 
 // thinkingHeadroom is the room left for thinking at each effort.
@@ -195,6 +198,9 @@ func defangPlain(sb *strings.Builder, text string, from, to int) {
 //   - 投稿の文字数の上限を超えた
 //   - 拒否 (refusal) など、本文として使えない終わり方をした
 //
+// 画像を送っていてAPIが400を返したときは、画像を外して1回だけ呼び直す(#6)。
+// 壊れた画像が1枚混ざっただけで、返事が丸ごと止まらないようにするため。
+//
 // 呼び直した分も費用の上限に数え、呼び直す前に上限を確かめる。
 func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, error) {
 	key, err := b.pctx.Secrets().Get(ctx, secretAPIKey)
@@ -232,16 +238,14 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 		maxTokens = autoMaxTokens(g.MaxChars, s.Effort)
 	}
 	system := g.System + lengthInstruction(g.MaxChars)
-	// 画像は「画像N」のラベルの後に置き、スレッドの文はその後にする。
-	// max_tokensで呼び直すときも同じ画像を送る。
-	content := make([]anthropic.ContentBlockParamUnion, 0, 2*len(g.Images)+1)
-	for _, im := range g.Images {
-		content = append(content, anthropic.NewTextBlock(im.Label), anthropic.NewImageBlockBase64(im.MediaType, im.Data))
-	}
-	content = append(content, anthropic.NewTextBlock(g.Prompt))
+	images, prompt := g.Images, g.Prompt
+	shortened, imagesDropped := false, false
+	// retry is why the next call is a retry. 空なら最初の呼び出し。呼び直すのは、
+	// 画像を外すときと「もっと短く」のときの、それぞれ1回まで。
+	retry := ""
 
-	for attempt := 0; attempt < 2; attempt++ {
-		if attempt == 1 {
+	for {
+		if retry != "" {
 			// 1 回目の前の確認は呼び出し側が行う (上限を超えたときに断りの文を
 			// 返すかどうかを決めるため)。呼び直しの前にもう一度確かめる。
 			reason, err := checkLimits(ctx, b.db(), s, g.UserID, g.Host)
@@ -249,11 +253,20 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				return "", err
 			}
 			if reason != "" {
-				b.logEvent(ctx, "warn", eventSilenced, "max_tokensで打ち切られたが、費用の上限のため呼び直さずに沈黙しました: "+reason, g.UserID, g.NoteID)
+				b.logEvent(ctx, "warn", eventSilenced, retry+"が、費用の上限のため呼び直さずに沈黙しました: "+reason, g.UserID, g.NoteID)
 				return "", errSilent
 			}
+		}
+		if shortened {
 			system = g.System + lengthInstruction(g.MaxChars) + shorterInstruction(g.MaxChars)
 		}
+		// 画像は「画像N」のラベルの後に置き、スレッドの文はその後にする。
+		// max_tokensで呼び直すときも同じ画像を送る。
+		content := make([]anthropic.ContentBlockParamUnion, 0, 2*len(images)+1)
+		for _, im := range images {
+			content = append(content, anthropic.NewTextBlock(im.Label), anthropic.NewImageBlockBase64(im.MediaType, im.Data))
+		}
+		content = append(content, anthropic.NewTextBlock(prompt))
 
 		params := anthropic.MessageNewParams{
 			Model:     anthropic.Model(s.Model),
@@ -284,6 +297,12 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				// worker を長く塞ぐ。
 				b.logEvent(ctx, "error", eventAPIError, "Claude APIの呼び出しが時間内に終わらなかったため、投稿しませんでした: "+describeAPIError(err), g.UserID, g.NoteID)
 				return "", errSilent
+			}
+			if class == "permanent" && len(images) > 0 && !imagesDropped && isBadRequest(err) {
+				b.logEvent(ctx, "warn", eventAPIError, "Claude APIが画像を含むリクエストを受け付けなかったため、画像を外して呼び直します: "+describeAPIError(err), g.UserID, g.NoteID)
+				images, prompt, imagesDropped = nil, g.PromptWithoutImages, true
+				retry = "Claude APIが画像を受け付けなかった"
+				continue
 			}
 			if class == "transient" {
 				// 混雑 (429 / 529)・5xx・通信の失敗は、時間をおけば通ることがある。
@@ -329,7 +348,9 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 			}
 			return text, nil
 		case anthropic.StopReasonMaxTokens:
-			if attempt == 0 {
+			if !shortened {
+				shortened = true
+				retry = "max_tokensで打ち切られた"
 				continue
 			}
 			b.logEvent(ctx, "warn", eventSilenced,
@@ -343,8 +364,12 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 			return "", errSilent
 		}
 	}
-	// ループは必ず中で返る。
-	return "", errSilent
+}
+
+// isBadRequest reports whether err is a 400 from Claude API.
+func isBadRequest(err error) bool {
+	var apierr *anthropic.Error
+	return errors.As(err, &apierr) && apierr.StatusCode == http.StatusBadRequest
 }
 
 // textOf joins the text blocks. 思考のブロック (thinking) は本文に入れない。

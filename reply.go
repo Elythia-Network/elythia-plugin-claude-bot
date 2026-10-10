@@ -193,17 +193,19 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 		// 下書きがある再試行ではClaudeを呼ばないので、画像もここでだけ取る。
 		vr := b.collectImages(ctx, s.Vision, note, ctxNotes, s.Reply.ContextNotes)
 		text, err = b.generate(ctx, s, generation{
-			Kind:      "reply",
-			UserID:    note.User.ID,
-			Host:      note.User.remoteHost(),
-			NoteID:    note.ID,
-			System:    s.Reply.SystemPrompt,
-			Prompt:    replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr),
-			Images:    vr.imageList(),
-			MaxChars:  s.Reply.MaxChars,
-			MaxTokens: s.Reply.MaxTokens,
-			PostLimit: maxNote - utf8.RuneCountInString(prefix),
-			Recipient: &note.User,
+			Kind:   "reply",
+			UserID: note.User.ID,
+			Host:   note.User.remoteHost(),
+			NoteID: note.ID,
+			System: s.Reply.SystemPrompt,
+			Prompt: replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr),
+			Images: vr.imageList(),
+			// 画像を外して呼び直すときは、プロンプトも送っていない扱いに作り直す。
+			PromptWithoutImages: replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr.withoutImages()),
+			MaxChars:            s.Reply.MaxChars,
+			MaxTokens:           s.Reply.MaxTokens,
+			PostLimit:           maxNote - utf8.RuneCountInString(prefix),
+			Recipient:           &note.User,
 		})
 		if errors.Is(err, errSilent) {
 			return "silent", nil

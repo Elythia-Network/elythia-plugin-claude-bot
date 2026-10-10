@@ -750,3 +750,92 @@ func TestVision_DuplicateFileIsSentOnce(t *testing.T) {
 	p := promptOf(e.claude.calls()[0])
 	assert.Equal(t, 2, strings.Count(p, "[画像1]"))
 }
+
+func TestVision_RetryWithoutImagesOnBadRequest(t *testing.T) {
+	setup := func(t *testing.T, mutate func(*Settings)) *env {
+		e := newEnv(t)
+		e.settings(func(s *Settings) {
+			visionOn(nil)(s)
+			if mutate != nil {
+				mutate(s)
+			}
+		})
+		e.api.notes["n1"] = withFiles(note("n1", "alice", "alice", "", "見て", "public"),
+			attachment("f1", "image/png", func(f map[string]any) { f["comment"] = "猫" }), attachment("f2", "video/mp4", func(f map[string]any) { f["thumbnailUrl"] = nil }))
+		e.claude.serveFile(driveHost+"f1", pngBytes)
+		return e
+	}
+
+	t.Run("retries once without images", func(t *testing.T) {
+		e := setup(t, nil)
+		e.claude.push(apiError(400, "invalid_request_error", "Could not process image"), message("文だけで返事", "end_turn", 1, 1))
+		require.NoError(t, e.mention("notif-1", "n1"))
+
+		calls := e.claude.calls()
+		require.Len(t, calls, 2)
+		assert.Len(t, imagesOf(t, calls[0]), 1)
+		assert.Len(t, contentOf(t, calls[1]), 1, "呼び直しでは画像を送らない")
+		p := promptOf(calls[1])
+		assert.NotContains(t, p, "[画像1")
+		assert.NotContains(t, p, "「画像N」のラベル")
+		assert.Contains(t, p, "見て\n(送っていない添付: 画像でないもの 1件、Claudeが受け付けなかった画像 1件)\n</post>")
+		assert.Equal(t, systemOf(calls[0]), systemOf(calls[1]), "短くする指示は足さない")
+		creates := e.api.callsTo("notes/create")
+		require.Len(t, creates, 1)
+		assert.Equal(t, "@alice 文だけで返事", creates[0].Params["text"])
+		assert.Equal(t, 2, e.usageRows(), "呼び直した分も数える")
+		errs := e.events(eventAPIError)
+		require.Len(t, errs, 1)
+		assert.Contains(t, errs[0].Message, "画像を外して呼び直します")
+		assert.Contains(t, errs[0].Message, "Could not process image")
+	})
+
+	t.Run("only once", func(t *testing.T) {
+		e := setup(t, nil)
+		e.claude.push(apiError(400, "invalid_request_error", "bad image"), apiError(400, "invalid_request_error", "still bad"))
+		require.NoError(t, e.mention("notif-1", "n1"))
+		assert.Len(t, e.claude.calls(), 2)
+		assert.Empty(t, e.api.callsTo("notes/create"))
+		assert.Len(t, e.events(eventAPIError), 2)
+	})
+
+	t.Run("not for other errors", func(t *testing.T) {
+		e := setup(t, nil)
+		e.claude.push(apiError(401, "authentication_error", "invalid x-api-key"))
+		require.NoError(t, e.mention("notif-1", "n1"))
+		assert.Len(t, e.claude.calls(), 1)
+		assert.Empty(t, e.api.callsTo("notes/create"))
+	})
+
+	t.Run("not without images", func(t *testing.T) {
+		e := newEnv(t)
+		e.settings(visionOn(nil))
+		e.api.notes["n1"] = note("n1", "alice", "alice", "", "見て", "public")
+		e.claude.push(apiError(400, "invalid_request_error", "bad"))
+		require.NoError(t, e.mention("notif-1", "n1"))
+		assert.Len(t, e.claude.calls(), 1)
+	})
+
+	t.Run("checks the limits before retrying", func(t *testing.T) {
+		e := setup(t, func(s *Settings) { s.Limits.PerUserPerHour = 1 })
+		e.claude.push(apiError(400, "invalid_request_error", "bad image"), message("出ない", "end_turn", 1, 1))
+		require.NoError(t, e.mention("notif-1", "n1"))
+		assert.Len(t, e.claude.calls(), 1)
+		assert.Empty(t, e.api.callsTo("notes/create"))
+		silenced := e.events(eventSilenced)
+		require.Len(t, silenced, 1)
+		assert.Contains(t, silenced[0].Message, "Claude APIが画像を受け付けなかったが、費用の上限")
+	})
+
+	t.Run("then shorter", func(t *testing.T) {
+		e := setup(t, nil)
+		e.claude.push(apiError(400, "invalid_request_error", "bad image"),
+			message("途中", "max_tokens", 1, 1), message("短く", "end_turn", 1, 1))
+		require.NoError(t, e.mention("notif-1", "n1"))
+		calls := e.claude.calls()
+		require.Len(t, calls, 3)
+		assert.Len(t, contentOf(t, calls[2]), 1, "画像は外したまま")
+		assert.Contains(t, systemOf(calls[2]), "途中で切れました")
+		assert.Len(t, e.api.callsTo("notes/create"), 1)
+	})
+}
