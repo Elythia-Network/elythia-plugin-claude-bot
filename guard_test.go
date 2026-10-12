@@ -130,3 +130,15 @@ func TestLeaksSystemPrompt_InvisibleCharactersAreIgnored(t *testing.T) {
 		})
 	}
 }
+
+func TestLeaksSystemPrompt_ExactBoundaries(t *testing.T) {
+	rs := []rune(secretPrompt)
+	exact := string(rs[:40])
+	require.Len(t, normalizeForLeak(exact), 40)
+	assert.True(t, leaksSystemPrompt(exact, exact), "ちょうど40文字の指示文を、ちょうど40文字の本文でそのまま出す")
+	assert.True(t, leaksSystemPrompt("前置き"+exact, exact), "40文字の指示文の全体")
+	assert.True(t, leaksSystemPrompt(exact+"後書き", "前置き"+exact), "指示文の最後の40文字")
+	last := string(rs[len(rs)-40:])
+	assert.True(t, leaksSystemPrompt(last, secretPrompt), "本文がちょうど指示文の最後の40文字")
+	assert.False(t, leaksSystemPrompt(string(rs[:39]), string(rs[:39])), "39文字の指示文は比べない")
+}
