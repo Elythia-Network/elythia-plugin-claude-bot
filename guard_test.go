@@ -111,3 +111,22 @@ func TestScheduled_DoesNotPostSystemPrompt(t *testing.T) {
 	assert.Empty(t, e.api.callsTo("notes/create"))
 	assert.Len(t, e.events(eventPromptLeak), 1)
 }
+
+func TestLeaksSystemPrompt_InvisibleCharactersAreIgnored(t *testing.T) {
+	run := string([]rune(secretPrompt)[:45])
+	interleave := func(sep string) string { return strings.Join(strings.Split(run, ""), sep) }
+	for name, sep := range map[string]string{
+		"combining acute accent (Mn)": "́",
+		"variation selector (Mn)":     "️",
+		"combining grapheme joiner":   "͏",
+		"enclosing circle (Me)":       "⃝",
+		"hangul choseong filler":      "ᅟ",
+		"hangul jungseong filler":     "ᅠ",
+		"hangul filler":               "ㅤ",
+		"halfwidth hangul filler":     "ﾠ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.True(t, leaksSystemPrompt(interleave(sep), secretPrompt))
+		})
+	}
+}
