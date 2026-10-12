@@ -341,6 +341,13 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				b.logEvent(ctx, "warn", eventSilenced, "返ってきた本文が空だったため、投稿しませんでした。", g.UserID, g.NoteID)
 				return "", errSilent
 			}
+			// 返事の指示文も定時の投稿の指示文も見る。どちらも運営者が公開を
+			// 想定していない文なので、どちらの呼び出しから漏れても止める。
+			if leaksSystemPrompt(text, g.System, s.Reply.SystemPrompt, s.Scheduled.SystemPrompt) {
+				b.logEvent(ctx, "warn", eventPromptLeak,
+					fmt.Sprintf("本文がシステムプロンプトの一部 (連続した%d文字以上) をそのまま含んでいたため、投稿しませんでした。", promptLeakWindow), g.UserID, g.NoteID)
+				return "", errSilent
+			}
 			if n := utf8.RuneCountInString(text); g.PostLimit > 0 && n > g.PostLimit {
 				b.logEvent(ctx, "warn", eventSilenced,
 					fmt.Sprintf("本文が投稿の文字数の上限 (%d文字) を超えた (%d文字) ため、投稿しませんでした。", g.PostLimit, n), g.UserID, g.NoteID)
