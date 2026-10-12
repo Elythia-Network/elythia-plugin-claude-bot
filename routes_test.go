@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/elythia-network/elythia/plugin"
@@ -317,4 +318,30 @@ func TestRoutes_SaveSettingsOverCurrent(t *testing.T) {
 			assert.Equal(t, http.StatusBadRequest, statusOf(t, err), body)
 		}
 	})
+}
+
+func TestRoutes_CreateAccountChecksNameLength(t *testing.T) {
+	db := testDB(t)
+	h := plugintest.New(t).WithName(Name).WithDB(db).WithAPI(newFakeAPI())
+	r := h.Routes(Plugin)
+	admin := func(body string) plugintest.Request {
+		return plugintest.Request{UserID: "admin", Administrator: true, Body: body}
+	}
+
+	_, err := r.Call(t, "POST /admin/account/create", admin(asJSON(t, map[string]any{
+		"username": "claude", "name": strings.Repeat("あ", maxNameChars+1),
+	})))
+	assert.Equal(t, http.StatusBadRequest, statusOf(t, err), "変更と同じく51文字以上は弾く")
+	assert.Empty(t, h.ManagedAccounts(), "弾いたときはアカウントを作らない")
+
+	name := strings.Repeat("あ", maxNameChars)
+	res, err := r.Call(t, "POST /admin/account/create", admin(asJSON(t, map[string]any{
+		"username": "claude", "name": "  " + name + "  ",
+	})))
+	require.NoError(t, err, "前後の空白を除いて50文字なら作れる")
+	require.NotNil(t, res.(*stateResponse).Account)
+	accs := h.ManagedAccounts()
+	require.Len(t, accs, 1)
+	require.NotNil(t, accs[0].Name)
+	assert.Equal(t, name, *accs[0].Name)
 }

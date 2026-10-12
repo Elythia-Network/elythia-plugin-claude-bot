@@ -203,6 +203,12 @@ func (b *bot) routeCreateAccount(req plugin.Request) (any, error) {
 	if err := req.Bind(&body); err != nil {
 		return nil, badRequest("入力を読めません")
 	}
+	name := strings.TrimSpace(body.Name)
+	// アカウントを作る前に確かめる。作った後に本体の i/update で弾かれると、
+	// 名前の無いアカウントだけが残る。
+	if err := checkProfileName(name); err != nil {
+		return nil, err
+	}
 	existing, err := b.botAccount(ctx)
 	if err != nil {
 		return nil, err
@@ -221,7 +227,7 @@ func (b *bot) routeCreateAccount(req plugin.Request) (any, error) {
 	}
 	desc := DefaultDescription
 	p := plugin.ProfileUpdate{Description: &desc}
-	if name := strings.TrimSpace(body.Name); name != "" {
+	if name != "" {
 		p.Name = &name
 	}
 	if err := b.pctx.Accounts().UpdateProfile(ctx, acc.ID, p); err != nil {
@@ -229,6 +235,18 @@ func (b *bot) routeCreateAccount(req plugin.Request) (any, error) {
 		b.logEvent(ctx, "warn", eventConfig, "botのプロフィールを設定できませんでした: "+err.Error(), "", "")
 	}
 	return b.state(req)
+}
+
+// maxNameChars is the longest display name. 本体の i/update と同じ上限。
+const maxNameChars = 50
+
+// checkProfileName refuses a display name that i/update would reject for its
+// length. 作成と変更の両方で同じ規則を使う。
+func checkProfileName(name string) error {
+	if utf8.RuneCountInString(name) > maxNameChars {
+		return badRequest("名前は%d文字以内にしてください", maxNameChars)
+	}
+	return nil
 }
 
 // maxAvatarBytes bounds the avatar. 本体の body の上限が 1 MiB で、base64 は
@@ -256,8 +274,10 @@ func (b *bot) routeUpdateAccount(req plugin.Request) (any, error) {
 		return nil, badRequest("botのアカウントがまだありません")
 	}
 	p := plugin.ProfileUpdate{Name: body.Name, Description: body.Description}
-	if p.Name != nil && utf8.RuneCountInString(*p.Name) > 50 {
-		return nil, badRequest("名前は50文字以内にしてください")
+	if p.Name != nil {
+		if err := checkProfileName(*p.Name); err != nil {
+			return nil, err
+		}
 	}
 	if p.Description != nil && utf8.RuneCountInString(*p.Description) > 1500 {
 		return nil, badRequest("自己紹介は1500文字以内にしてください")
