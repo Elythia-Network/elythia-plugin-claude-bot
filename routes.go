@@ -27,7 +27,7 @@ import (
 func routes(pctx plugin.Context, r plugin.Router) error {
 	b := newBot(pctx)
 	r.POST("/admin/state", b.requireModerator(b.routeState))
-	r.POST("/admin/events", b.requireAdmin(b.routeEvents))
+	r.POST("/admin/events", b.requireAdminToRead(b.routeEvents))
 	r.POST("/admin/settings", b.requireAdmin(b.routeSaveSettings))
 	r.POST("/admin/account/create", b.requireAdmin(b.routeCreateAccount))
 	r.POST("/admin/account/update", b.requireAdmin(b.routeUpdateAccount))
@@ -48,6 +48,17 @@ func (b *bot) requireAdmin(h plugin.Handler) plugin.Handler {
 	return func(req plugin.Request) (any, error) {
 		if !req.IsAdministrator() {
 			return nil, plugin.Errorf(http.StatusForbidden, "管理者だけが変更できます")
+		}
+		return h(req)
+	}
+}
+
+// requireAdminToRead is requireAdmin for routes that only read. 断りの文で
+// 「変更」と言わないよう分けている。
+func (b *bot) requireAdminToRead(h plugin.Handler) plugin.Handler {
+	return func(req plugin.Request) (any, error) {
+		if !req.IsAdministrator() {
+			return nil, plugin.Errorf(http.StatusForbidden, "管理者だけが読めます")
 		}
 		return h(req)
 	}

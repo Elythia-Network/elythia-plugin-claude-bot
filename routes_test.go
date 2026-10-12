@@ -52,6 +52,7 @@ func TestRoutes_Permissions(t *testing.T) {
 
 	_, err = r.Call(t, "POST /admin/events", plugintest.Request{UserID: "m", Moderator: true, Body: `{}`})
 	assert.Equal(t, http.StatusForbidden, statusOf(t, err), "モデレーターは記録を読めない")
+	assert.NotContains(t, err.Error(), "変更", "読むだけのルートの断りで変更とは言わない")
 	_, err = r.Call(t, "POST /admin/events", plugintest.Request{UserID: "u", Body: `{}`})
 	assert.Equal(t, http.StatusForbidden, statusOf(t, err), "一般の利用者は記録を読めない")
 }
