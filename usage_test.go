@@ -2,9 +2,11 @@ package claudebot
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/elythia-network/elythia/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -233,4 +235,48 @@ func TestPeriodStarts(t *testing.T) {
 	day, month := periodStarts(time.Date(2026, 10, 31, 16, 0, 0, 0, time.UTC), loc) // 11-01 01:00 JST
 	assert.Equal(t, time.Date(2026, 11, 1, 0, 0, 0, 0, loc), day)
 	assert.Equal(t, time.Date(2026, 11, 1, 0, 0, 0, 0, loc), month)
+}
+
+func TestRoutes_UnpricedModelNeedsTokenCapWhenBudgetStops(t *testing.T) {
+	e := newEnv(t)
+	r := e.h.Routes(Plugin)
+	save := func(s Settings) error {
+		_, err := r.Call(t, "POST /admin/settings", plugintest.Request{Administrator: true, Body: asJSON(t, map[string]any{"settings": s})})
+		return err
+	}
+	// 予算で止める設定で、単価の無いモデルを使い、tokenの上限も無い。
+	risky := func() Settings {
+		s := defaultSettings()
+		s.Model = "claude-brand-new"
+		s.Effort = ""
+		s.Budget = BudgetSettings{MonthlyUSD: 10, WarnPercent: 20, StopWhenExhausted: true}
+		s.Limits.MonthlyTokens = 0
+		return s
+	}
+
+	err := save(risky())
+	require.Error(t, err)
+	assert.Equal(t, http.StatusBadRequest, statusOf(t, err))
+	assert.Contains(t, err.Error(), "claude-brand-new")
+	got, err := loadSettings(t.Context(), e.db)
+	require.NoError(t, err)
+	assert.Equal(t, defaultSettings().Model, got.Model, "弾いた設定は保存しない")
+
+	ok := map[string]func(*Settings){
+		"priced model":               func(s *Settings) { s.Model = "claude-opus-5-5" },
+		"dated id of a priced model": func(s *Settings) { s.Model = "claude-sonnet-4-5-20250929" },
+		"price override": func(s *Settings) {
+			s.PriceOverrides = []PriceOverride{{Model: "claude-brand-new", Price: Price{Input: 1}}}
+		},
+		"monthly token cap":    func(s *Settings) { s.Limits.MonthlyTokens = 1_000_000 },
+		"budget does not stop": func(s *Settings) { s.Budget.StopWhenExhausted = false },
+		"no budget":            func(s *Settings) { s.Budget.MonthlyUSD = 0 },
+	}
+	for name, mutate := range ok {
+		t.Run(name, func(t *testing.T) {
+			s := risky()
+			mutate(&s)
+			assert.NoError(t, save(s))
+		})
+	}
 }
