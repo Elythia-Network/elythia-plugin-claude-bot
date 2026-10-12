@@ -18,11 +18,16 @@ import (
  * 画面はモデレーター以上にしか出ないが、それは UI の都合でしかないので、
  * ここで必ず確かめる。読むのはモデレーター以上、変えるのは管理者だけ
  * (APIキーの費用と、サーバーの名前で投稿するアカウントを扱うため)。
+ *
+ * 記録 (events) は管理者だけが読める。話しかけた人の ID と投稿の ID、
+ * Claude API が返したエラーの本文 (入力の一部を含みうる) が入るため。
+ * モデレーターに見せるのは設定と使った量だけにする。
  */
 
 func routes(pctx plugin.Context, r plugin.Router) error {
 	b := newBot(pctx)
 	r.POST("/admin/state", b.requireModerator(b.routeState))
+	r.POST("/admin/events", b.requireAdmin(b.routeEvents))
 	r.POST("/admin/settings", b.requireAdmin(b.routeSaveSettings))
 	r.POST("/admin/account/create", b.requireAdmin(b.routeCreateAccount))
 	r.POST("/admin/account/update", b.requireAdmin(b.routeUpdateAccount))
@@ -64,11 +69,10 @@ type stateResponse struct {
 	MaxNoteTextLength int          `json:"maxNoteTextLength"`
 	Usage             usageSummary `json:"usage"`
 	Prices            []priceRow   `json:"prices"`
-	Events            []event      `json:"events"`
 	// DefaultDescription is the profile text set on creation.
 	DefaultDescription string `json:"defaultDescription"`
-	// CanEdit is true for administrators. 画面で保存のボタンを出すかに使う
-	// (権限の判定そのものは各ルートが行う)。
+	// CanEdit is true for administrators. 画面で保存のボタンと記録を出すかに
+	// 使う (権限の判定そのものは各ルートが行う)。
 	CanEdit bool `json:"canEdit"`
 	// Warnings are notes about the saved settings that did not block saving.
 	Warnings []string `json:"warnings"`
@@ -85,10 +89,6 @@ func (b *bot) state(req plugin.Request) (*stateResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	events, err := recentEvents(ctx, db, 100)
-	if err != nil {
-		return nil, err
-	}
 	acc, err := b.botAccount(ctx)
 	if err != nil {
 		return nil, err
@@ -98,7 +98,6 @@ func (b *bot) state(req plugin.Request) (*stateResponse, error) {
 		MaxNoteTextLength:  b.maxNoteLength(ctx),
 		Usage:              usage,
 		Prices:             priceRows(),
-		Events:             events,
 		DefaultDescription: DefaultDescription,
 		CanEdit:            req.IsAdministrator(),
 		Warnings:           []string{},
@@ -118,6 +117,22 @@ func (b *bot) state(req plugin.Request) (*stateResponse, error) {
 
 func (b *bot) routeState(req plugin.Request) (any, error) {
 	return b.state(req)
+}
+
+// maxEventsShown is how many events the admin page shows.
+const maxEventsShown = 100
+
+// eventsResponse is the admin page's log.
+type eventsResponse struct {
+	Events []event `json:"events"`
+}
+
+func (b *bot) routeEvents(req plugin.Request) (any, error) {
+	events, err := recentEvents(req.Context(), b.db(), maxEventsShown)
+	if err != nil {
+		return nil, err
+	}
+	return &eventsResponse{Events: events}, nil
 }
 
 func (b *bot) routeSaveSettings(req plugin.Request) (any, error) {

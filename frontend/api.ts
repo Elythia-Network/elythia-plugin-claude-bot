@@ -101,6 +101,11 @@ export type BotEvent = {
 	noteId?: string;
 };
 
+/** Response of admin/events (administrators only). */
+export type EventsResponse = {
+	events: BotEvent[];
+};
+
 export type PriceRow = Price & {
 	model: string;
 	large?: Price;
@@ -121,9 +126,8 @@ export type State = {
 	maxNoteTextLength: number;
 	usage: { today: PeriodUsage; month: PeriodUsage; budget: BudgetStatus | null };
 	prices: PriceRow[];
-	events: BotEvent[];
 	defaultDescription: string;
-	/** 管理者なら true。モデレーターは見るだけ。 */
+	/** 管理者なら true。モデレーターは見るだけで、記録 (admin/events) は読めない。 */
 	canEdit: boolean;
 	/** 保存はできたが気を付けること (単価の表に無いモデルなど)。 */
 	warnings: string[];
