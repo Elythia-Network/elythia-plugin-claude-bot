@@ -275,9 +275,12 @@ func (b *bot) routeUpdateAccount(req plugin.Request) (any, error) {
 	}
 	p := plugin.ProfileUpdate{Name: body.Name, Description: body.Description}
 	if p.Name != nil {
-		if err := checkProfileName(*p.Name); err != nil {
+		// 作成と同じく、前後の空白を除いてから数えて保存する。
+		name := strings.TrimSpace(*p.Name)
+		if err := checkProfileName(name); err != nil {
 			return nil, err
 		}
+		p.Name = &name
 	}
 	if p.Description != nil && utf8.RuneCountInString(*p.Description) > 1500 {
 		return nil, badRequest("自己紹介は1500文字以内にしてください")

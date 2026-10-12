@@ -345,3 +345,21 @@ func TestRoutes_CreateAccountChecksNameLength(t *testing.T) {
 	require.NotNil(t, accs[0].Name)
 	assert.Equal(t, name, *accs[0].Name)
 }
+
+func TestRoutes_UpdateAccountTrimsName(t *testing.T) {
+	e := newEnv(t)
+	r := e.h.Routes(Plugin)
+	admin := func(body string) plugintest.Request {
+		return plugintest.Request{UserID: "admin", Administrator: true, Body: body}
+	}
+	name := strings.Repeat("あ", maxNameChars)
+	_, err := r.Call(t, "POST /admin/account/update", admin(asJSON(t, map[string]any{"name": " \n" + name + "  "})))
+	require.NoError(t, err, "前後の空白を除いて50文字なら変えられる (作成と同じ)")
+	accs := e.h.ManagedAccounts()
+	require.Len(t, accs, 1)
+	require.NotNil(t, accs[0].Name)
+	assert.Equal(t, name, *accs[0].Name, "前後の空白を除いた名前を保存する")
+
+	_, err = r.Call(t, "POST /admin/account/update", admin(asJSON(t, map[string]any{"name": " " + name + "あ "})))
+	assert.Equal(t, http.StatusBadRequest, statusOf(t, err))
+}
