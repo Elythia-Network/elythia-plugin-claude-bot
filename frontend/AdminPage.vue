@@ -226,7 +226,10 @@ SPDX-License-Identifier: AGPL-3.0-only
 				<MkInput v-model="draft.budget.warnPercent" type="number" :min="0" :max="100">
 					<template #label>残りがこの割合 (%) を下回ったら警告する</template>
 				</MkInput>
-				<MkSwitch v-model="draft.budget.stopWhenExhausted">予算を使い切ったら返事と定時の投稿を止める</MkSwitch>
+				<MkSwitch v-model="draft.budget.stopWhenExhausted">
+					<template #label>予算を使い切ったら返事と定時の投稿を止める</template>
+					<template #caption>単価が未設定のモデルは額に入らないので、予算では止まりません。そのモデルで予算を使うときは、単価を上書きするか、1か月のtokenの量に上限を入れてください (どちらも無いと保存できません)。</template>
+				</MkSwitch>
 			</div>
 		</MkFolder>
 

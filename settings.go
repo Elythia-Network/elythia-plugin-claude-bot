@@ -266,14 +266,14 @@ func (s Settings) validate(maxNoteLength int) ([]string, error) {
 	if err := s.check(maxNoteLength); err != nil {
 		return nil, err
 	}
-	known := false
-	if _, ok := priceTable[canonicalModel(s.Model)]; ok {
-		known = true
-	}
-	for _, o := range s.PriceOverrides {
-		if canonicalModel(o.Model) == canonicalModel(s.Model) {
-			known = true
-		}
+	// 使った額を数えるときと同じ方法で引く (表か上書きにあれば単価がある)。
+	_, known := newPricer(s.PriceOverrides).lookup(s.Model, 0)
+	// 単価の無いモデルの呼び出しは額に入らないので、予算を使い切っても
+	// 止まらない。1か月のtokenの量も無制限だと、止める仕組みが何も
+	// 残らないので、保存させない。返事と定時の投稿は同じモデルを使う。
+	if !known && s.Budget.MonthlyUSD > 0 && s.Budget.StopWhenExhausted && s.Limits.MonthlyTokens == 0 {
+		return nil, badRequest(
+			"モデル %q は単価が未設定のため、使った額を数えられず、予算を使い切っても止まりません。単価を上書きするか、1か月のtokenの量に上限を入れてください。", s.Model)
 	}
 	if !known {
 		warnings = append(warnings, fmt.Sprintf(
