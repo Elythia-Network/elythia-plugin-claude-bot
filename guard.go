@@ -14,17 +14,31 @@ import (
 // なる長さにする。
 const promptLeakWindow = 40
 
+// isHangulFiller reports whether r is a Hangul filler, which renders as
+// nothing on its own.
+func isHangulFiller(r rune) bool {
+	switch r {
+	case '\u115f', '\u1160', '\u3164', '\uffa0':
+		return true
+	}
+	return false
+}
+
 // normalizeForLeak folds the differences a copied prompt can carry without
-// changing its meaning: whitespace and format characters (幅の無い空白など)
-// are dropped, full-width ASCII is folded to ASCII, and letters are lowercased.
+// changing its meaning: whitespace, format characters (幅の無い空白など),
+// nonspacing and enclosing marks (異体字セレクタ、CGJ、結合文字など) and
+// Hangul fillers are dropped, full-width ASCII is folded to ASCII, and letters
+// are lowercased.
 //
-// 空白や幅の無い空白を1文字ずつ挟ませる、全角にさせる、といった小さな
+// 空白や見えない文字を1文字ずつ挟ませる、全角にさせる、といった小さな
 // 書き換えで一致を外されないようにするため。defangMentions が挟む U+200B も
-// ここで落ちる。
+// ここで落ちる。結合文字を落とすので、アクセントの付いた文字と付かない文字は
+// 同じに数える (分解された形のときだけ。止める側に倒れるので構わない)。
+// NFKC は新しい依存が要るので使わない。
 func normalizeForLeak(s string) []rune {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
-		if unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsSpace(r) || unicode.In(r, unicode.Cf, unicode.Mn, unicode.Me) || isHangulFiller(r) {
 			continue
 		}
 		if r >= 0xFF01 && r <= 0xFF5E {
