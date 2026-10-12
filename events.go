@@ -18,6 +18,7 @@ const (
 	eventConfig     = "config"
 	eventReactError = "reaction_error"
 	eventImage      = "image"
+	eventPromptLeak = "prompt_leak"
 )
 
 // event is one line of the admin page's log.

@@ -404,6 +404,7 @@ const kindLabels: Record<string, string> = {
 	config: '設定',
 	reaction_error: 'リアクションの失敗',
 	image: '画像',
+	prompt_leak: 'プロンプトの写し',
 };
 function kindLabel(kind: string): string {
 	return kindLabels[kind] ?? kind;
