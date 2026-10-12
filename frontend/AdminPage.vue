@@ -317,16 +317,17 @@ SPDX-License-Identifier: AGPL-3.0-only
 			</div>
 		</MkFolder>
 
-		<!-- 記録 -->
-		<MkFolder :defaultOpen="false">
+		<!-- 記録。話しかけた人のIDやAPIのエラーの本文が入るので、管理者にだけ出す。 -->
+		<MkFolder v-if="state.canEdit" :defaultOpen="false">
 			<template #label>記録</template>
-			<template #suffix>{{ state.events.length }} 件</template>
+			<template #suffix>{{ events.length }} 件</template>
 			<div :class="$style.scroll">
-				<div v-if="state.events.length === 0" :class="$style.note">記録はありません。</div>
+				<div v-if="eventsError" :class="$style.error">{{ eventsError }}</div>
+				<div v-else-if="events.length === 0" :class="$style.note">記録はありません。</div>
 				<table v-else :class="$style.table">
 					<thead><tr><th>日時</th><th>種類</th><th>内容</th></tr></thead>
 					<tbody>
-						<tr v-for="(ev, i) in state.events" :key="i">
+						<tr v-for="(ev, i) in events" :key="i">
 							<td>{{ new Date(ev.at).toLocaleString() }}</td>
 							<td :class="ev.level === 'error' ? $style.bad : undefined">{{ kindLabel(ev.kind) }}</td>
 							<td :class="$style.message">{{ ev.message }}<span v-if="ev.noteId" :class="$style.note"> (投稿 {{ ev.noteId }})</span></td>
@@ -345,9 +346,11 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, readAsBase64, totalTokens, usd } from './api.js';
-import type { PeriodUsage, Settings, State } from './api.js';
+import type { BotEvent, EventsResponse, PeriodUsage, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
+const events = ref<BotEvent[]>([]);
+const eventsError = ref('');
 const draft = ref<Settings | null>(null);
 const loadError = ref('');
 const saveError = ref('');
@@ -421,6 +424,16 @@ const usageRows = [
 	{ label: '概算の額', value: (u: PeriodUsage) => usd(u.costUsd) },
 ];
 
+// 記録は管理者だけが読める別のルートにある。モデレーターには取りに行かない。
+async function loadEvents() {
+	try {
+		events.value = (await api<EventsResponse>('admin/events')).events;
+		eventsError.value = '';
+	} catch (err) {
+		eventsError.value = errorMessage(err);
+	}
+}
+
 // keepDraft が true なら、編集中の設定を残す。プロフィールやアカウントの
 // 操作で、保存していない設定の変更を消さないため。
 function apply(s: State, keepDraft = false) {
@@ -432,6 +445,7 @@ function apply(s: State, keepDraft = false) {
 	}
 	profileName.value = s.account?.name ?? '';
 	profileDescription.value = s.account?.description ?? '';
+	if (s.canEdit) void loadEvents();
 }
 
 async function load() {

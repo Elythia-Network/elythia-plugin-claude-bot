@@ -48,6 +48,11 @@ func TestRoutes_Permissions(t *testing.T) {
 		_, err := r.Call(t, "POST "+path, plugintest.Request{UserID: "m", Moderator: true, Body: `{}`})
 		assert.Equal(t, http.StatusForbidden, statusOf(t, err), "モデレーターは変えられない: %s", path)
 	}
+
+	_, err = r.Call(t, "POST /admin/events", plugintest.Request{UserID: "m", Moderator: true, Body: `{}`})
+	assert.Equal(t, http.StatusForbidden, statusOf(t, err), "モデレーターは記録を読めない")
+	_, err = r.Call(t, "POST /admin/events", plugintest.Request{UserID: "u", Body: `{}`})
+	assert.Equal(t, http.StatusForbidden, statusOf(t, err), "一般の利用者は記録を読めない")
 }
 
 func TestRoutes_AccountLifecycle(t *testing.T) {
@@ -170,15 +175,16 @@ func TestRoutes_SaveSettingsValidates(t *testing.T) {
 	assert.Equal(t, 500, got.Reply.MaxChars)
 }
 
-func TestRoutes_StateShowsUsageAndEvents(t *testing.T) {
+func TestRoutes_StateShowsUsageAndEventsAreAdminOnly(t *testing.T) {
 	e := newEnv(t)
 	e.settings(func(s *Settings) { s.Budget.MonthlyUSD = 10 })
 	e.addUsage("alice", now(), "claude-opus-5-5", tokens{Input: 1_000_000})
 	e.api.notes["n1"] = note("n1", "alice", "alice", "", "hi", "public")
 	e.claude.push(apiError(401, "authentication_error", "invalid x-api-key"))
 	require.NoError(t, e.mention("x", "n1"))
+	r := e.h.Routes(Plugin)
 
-	res, err := e.h.Routes(Plugin).Call(t, "POST /admin/state", plugintest.Request{Moderator: true})
+	res, err := r.Call(t, "POST /admin/state", plugintest.Request{Moderator: true})
 	require.NoError(t, err)
 	st := res.(*stateResponse)
 	require.NotNil(t, st.Account)
@@ -187,9 +193,23 @@ func TestRoutes_StateShowsUsageAndEvents(t *testing.T) {
 	assert.InDelta(t, 4, st.Usage.Month.CostUSD, 1e-9)
 	require.NotNil(t, st.Usage.Budget)
 	assert.InDelta(t, 6, st.Usage.Budget.RemainingUSD, 1e-9)
-	require.NotEmpty(t, st.Events)
-	assert.Equal(t, eventAPIError, st.Events[0].Kind)
-	assert.Contains(t, st.Events[0].Message, "invalid x-api-key")
+	assert.Equal(t, defaultSettings().Reply.SystemPrompt, st.Settings.Reply.SystemPrompt, "モデレーターにも設定は見せる")
+	// 記録はモデレーターに返す応答のどこにも入らない (JSON にして確かめる)。
+	raw := asJSON(t, st)
+	assert.NotContains(t, raw, `"events"`)
+	assert.NotContains(t, raw, "invalid x-api-key")
+	assert.NotContains(t, raw, `"n1"`)
+
+	_, err = r.Call(t, "POST /admin/events", plugintest.Request{Moderator: true})
+	assert.Equal(t, http.StatusForbidden, statusOf(t, err), "記録は管理者だけ")
+
+	res, err = r.Call(t, "POST /admin/events", plugintest.Request{Administrator: true})
+	require.NoError(t, err)
+	evs := res.(*eventsResponse).Events
+	require.NotEmpty(t, evs)
+	assert.Equal(t, eventAPIError, evs[0].Kind)
+	assert.Contains(t, evs[0].Message, "invalid x-api-key")
+	assert.Equal(t, "n1", evs[0].NoteID)
 }
 
 func TestLoadSettings_DefaultsFillNewFields(t *testing.T) {

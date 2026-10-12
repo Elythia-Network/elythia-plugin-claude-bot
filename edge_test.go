@@ -127,6 +127,8 @@ func TestStorageFailures(t *testing.T) {
 		require.NoError(t, err)
 		_, err = recentEvents(ctx, e.db, 1)
 		require.Error(t, err)
+		_, err = e.h.Routes(Plugin).Call(t, "POST /admin/events", plugintest.Request{Administrator: true})
+		require.Error(t, err)
 		// 記録に失敗しても処理は止めない。
 		newBot(e.h.Context()).logEvent(ctx, "info", "x", "y", "", "")
 	})
