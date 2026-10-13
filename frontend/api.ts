@@ -163,7 +163,7 @@ export function errorMessage(err: unknown): string {
 }
 
 /** Reads a file as base64 (without the data: prefix). */
-export function readAsBase64(file: File): Promise<string> {
+export function readAsBase64(file: Blob): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const reader = new FileReader();
 		reader.onload = () => {
@@ -173,4 +173,51 @@ export function readAsBase64(file: File): Promise<string> {
 		reader.onerror = () => reject(reader.error);
 		reader.readAsDataURL(file);
 	});
+}
+
+/**
+ * The largest avatar the server accepts, in bytes. Same as maxAvatarBytes in
+ * routes.go.
+ */
+export const maxAvatarBytes = 700 * 1024;
+
+// 縮めるときの長辺。アイコンとして表示する大きさには十分足りる。
+const avatarEdge = 512;
+
+/**
+ * Returns the avatar to send: the file itself when it is small enough, or a
+ * copy scaled down to fit maxAvatarBytes.
+ */
+export async function fitAvatar(file: File): Promise<{ blob: Blob; filename: string }> {
+	// 本体は /api の body を1MiBで切る。base64は4/3倍になるので、上限を超える
+	// 画像はそのまま送ると、名前や自己紹介ごと413で弾かれる (#9)。上限以下の
+	// ものはGIFの動きを残すため、そのまま送る。
+	if (file.size <= maxAvatarBytes) return { blob: file, filename: file.name };
+	let bitmap: ImageBitmap;
+	try {
+		bitmap = await createImageBitmap(file);
+	} catch {
+		throw new Error('アイコンの画像を読めません');
+	}
+	try {
+		const scale = Math.min(1, avatarEdge / Math.max(bitmap.width, bitmap.height));
+		const canvas = document.createElement('canvas');
+		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+		canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+		const g = canvas.getContext('2d');
+		if (!g) throw new Error('アイコンの画像を縮められません');
+		g.imageSmoothingQuality = 'high';
+		g.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+		// WebPを書けないブラウザは、黙ってPNGを返す。名前は実際の形式から付ける。
+		for (const type of ['image/webp', 'image/jpeg']) {
+			const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, type, 0.9));
+			if (blob && blob.size <= maxAvatarBytes) {
+				const ext = blob.type === 'image/webp' ? 'webp' : blob.type === 'image/jpeg' ? 'jpg' : 'png';
+				return { blob, filename: `${file.name.replace(/\.[^.]*$/, '')}.${ext}` };
+			}
+		}
+	} finally {
+		bitmap.close();
+	}
+	throw new Error(`アイコンの画像を${maxAvatarBytes / 1024}KB以下に縮められません`);
 }
