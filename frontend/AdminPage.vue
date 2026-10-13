@@ -57,7 +57,8 @@ SPDX-License-Identifier: AGPL-3.0-only
 				</div>
 				<div>
 					<div :class="$style.label">アイコン</div>
-					<input type="file" accept="image/*" @change="onAvatar"/>
+					<input ref="avatarInput" type="file" accept="image/*" :disabled="busy" @change="onAvatar"/>
+					<MkButton v-if="avatarFile" inline small :disabled="busy" @click="clearAvatar">選択を外す</MkButton>
 				</div>
 				<div class="_buttons">
 					<MkButton primary :disabled="busy || !state.canEdit" @click="updateProfile">プロフィールを保存</MkButton>
@@ -348,7 +349,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
-import { api, autoMaxTokens, errorMessage, readAsBase64, totalTokens, usd } from './api.js';
+import { api, autoMaxTokens, errorMessage, fitAvatar, readAsBase64, totalTokens, usd } from './api.js';
 import type { BotEvent, EventsResponse, PeriodUsage, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
@@ -365,6 +366,7 @@ const newName = ref('');
 const profileName = ref('');
 const profileDescription = ref('');
 const avatarFile = ref<File | null>(null);
+const avatarInput = ref<HTMLInputElement | null>(null);
 const deleteConfirm = ref('');
 const scheduledTimes = ref('');
 
@@ -441,6 +443,9 @@ async function loadEvents() {
 // keepDraft が true なら、編集中の設定を残す。プロフィールやアカウントの
 // 操作で、保存していない設定の変更を消さないため。
 function apply(s: State, keepDraft = false) {
+	// アカウントを削除して作り直すと、file inputは空で作り直されるが、選んだ
+	// ファイルのrefは残る。見えない画像を送らないよう、ここで外す。
+	if (s.account?.id !== state.value?.account?.id) clearAvatar();
 	state.value = s;
 	if (!keepDraft || draft.value == null) {
 		// 編集中の値は、保存するまでサーバーの値と分けておく。
@@ -526,15 +531,34 @@ function onAvatar(ev: Event) {
 	avatarFile.value = (ev.target as HTMLInputElement).files?.[0] ?? null;
 }
 
+function clearAvatar() {
+	avatarFile.value = null;
+	if (avatarInput.value) avatarInput.value.value = '';
+}
+
 async function updateProfile() {
-	const params: Record<string, unknown> = {
-		name: profileName.value,
-		description: profileDescription.value,
-	};
-	if (avatarFile.value) {
-		params.avatar = { data: await readAsBase64(avatarFile.value), filename: avatarFile.value.name };
-	}
-	return run(() => api<State>('admin/account/update', params), true);
+	const file = avatarFile.value;
+	await run(async () => {
+		const params: Record<string, unknown> = {
+			name: profileName.value,
+			description: profileDescription.value,
+		};
+		if (file) {
+			try {
+				const { blob, filename } = await fitAvatar(file);
+				params.avatar = { data: await readAsBase64(blob), filename };
+			} catch (err) {
+				// 選択を残すと、名前だけ直して保存し直しても同じ画像で失敗し続ける。
+				// 名前と自己紹介もまだ送っていないことを、文で伝える。
+				clearAvatar();
+				throw new Error(`${errorMessage(err)}。画像の選択を外したので、もう一度保存してください`);
+			}
+		}
+		return api<State>('admin/account/update', params);
+	}, true);
+	// 選んだファイルを残すと、名前だけ直して保存し直したときにも同じ画像を
+	// 送ってしまう (#9)。
+	if (saved.value && avatarFile.value === file) clearAvatar();
 }
 
 function deleteAccount() {
