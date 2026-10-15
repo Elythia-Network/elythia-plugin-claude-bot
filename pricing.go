@@ -58,6 +58,10 @@ var priceTable = map[string]priceEntry{
 	"claude-haiku-4-5": {Price: Price{1, 1.25, 0.10, 5}, Dated: true},
 }
 
+// webSearchUSD is the price of one web search (1,000回あたり10ドル)。
+// エラーになった検索は課金されず、usage.server_tool_use にも数えられない。
+const webSearchUSD = 0.01
+
 var datedSuffix = regexp.MustCompile(`^(.+)-[0-9]{8}$`)
 
 // tokens is the usage of one or more API calls.

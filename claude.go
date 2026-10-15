@@ -60,6 +60,9 @@ type generation struct {
 	// PromptWithoutImages is Prompt rewritten as if no image had been sent.
 	// APIが画像のせいで400を返したときに、画像を外して呼び直すのに使う。
 	PromptWithoutImages string
+	// Web is what the reply may do with the web (#11). nil ならwebの設定が
+	// OFFで、リクエストは今までと同じになる。定時の投稿では常に nil。
+	Web *webPlan
 }
 
 // thinkingHeadroom is the room left for thinking at each effort.
@@ -201,6 +204,11 @@ func defangPlain(sb *strings.Builder, text string, from, to int) {
 // 画像を送っていてAPIが400を返したときは、画像を外して1回だけ呼び直す(#6)。
 // 壊れた画像が1枚混ざっただけで、返事が丸ごと止まらないようにするため。
 //
+// webのツールを渡していて(#11)、APIがそれを受け付けない400(組織の設定で
+// 無効など)を返したか、timeoutになったときは、webを外して1回だけ呼び直す。
+// 中断(pause_turn)が返ったら、返ってきた内容を付けて続きを呼ぶ
+// (maxPauseContinuations回まで)。
+//
 // 呼び直した分も費用の上限に数え、呼び直す前に上限を確かめる。
 func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, error) {
 	key, err := b.pctx.Secrets().Get(ctx, secretAPIKey)
@@ -233,16 +241,23 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 		option.WithMaxRetries(0),
 	)
 
-	maxTokens := g.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = autoMaxTokens(g.MaxChars, s.Effort)
-	}
-	system := g.System + lengthInstruction(g.MaxChars)
 	images, prompt := g.Images, g.Prompt
 	shortened, imagesDropped := false, false
 	// retry is why the next call is a retry. 空なら最初の呼び出し。呼び直すのは、
-	// 画像を外すときと「もっと短く」のときの、それぞれ1回まで。
+	// 画像を外すとき、「もっと短く」のとき、webを外すときの、それぞれ1回まで。
+	// pause_turnの続きはmaxPauseContinuations回まで。
 	retry := ""
+	// paused is the assistant content of a paused turn (#11). 続きを呼ぶときに
+	// そのまま付ける。turn holds the responses of the current turn, for the
+	// sources.
+	var paused []anthropic.ContentBlockParamUnion
+	var turn []*anthropic.Message
+	pauses := 0
+	// webDeadline is when the calls with the web must stop (webReplyBudget).
+	// 最初にwebを渡す呼び出しの前に決める。
+	var webDeadline time.Time
+	// restart drops a paused turn so the next call starts over.
+	restart := func() { paused, turn = nil, nil }
 
 	for {
 		if retry != "" {
@@ -257,8 +272,35 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				return "", errSilent
 			}
 		}
+		// ツールは残っている回数で決める。中断した続きでは、前の呼び出しで
+		// 渡したツールがどれも残っていることを確かめてあるので、同じツールを
+		// 残りの回数で渡すことになる。
+		tools := g.Web.tools()
+		var opts []option.RequestOption
+		if len(tools) > 0 {
+			if webDeadline.IsZero() {
+				webDeadline = time.Now().Add(webReplyBudget)
+			}
+			left := time.Until(webDeadline)
+			if left < minWebCallTime {
+				b.logEvent(ctx, "warn", eventWeb, fmt.Sprintf("webを使う時間の上限 (1回の返事で%s) に達したため、webを使わずに呼びます。", webReplyBudget), g.UserID, g.NoteID)
+				g.Web.withdraw()
+				restart()
+				tools = nil
+			} else {
+				opts = b.webRequestOptions(min(webRequestTimeout, left))
+			}
+		}
+		maxTokens := g.MaxTokens
+		if maxTokens <= 0 {
+			maxTokens = autoMaxTokens(g.MaxChars, s.Effort)
+			if len(tools) > 0 {
+				maxTokens = min(maxTokens+webHeadroom, maxTokensCap)
+			}
+		}
+		system := g.System + g.Web.instruction(len(tools) > 0) + lengthInstruction(g.MaxChars)
 		if shortened {
-			system = g.System + lengthInstruction(g.MaxChars) + shorterInstruction(g.MaxChars)
+			system += shorterInstruction(g.MaxChars)
 		}
 		// 画像は「画像N」のラベルの後に置き、スレッドの文はその後にする。
 		// max_tokensで呼び直すときも同じ画像を送る。
@@ -276,21 +318,72 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				anthropic.NewUserMessage(content...),
 			},
 		}
+		if len(paused) > 0 {
+			params.Messages = append(params.Messages, anthropic.NewAssistantMessage(paused...))
+		}
+		if len(tools) > 0 {
+			params.Tools = tools
+		}
 		if s.Effort != "" {
 			params.OutputConfig = anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(s.Effort)}
 		}
-		msg, err := client.Messages.New(ctx, params)
+		msg, err := client.Messages.New(ctx, params, opts...)
 		if err != nil {
 			if ctx.Err() != nil {
+				// 取り消されたときは記録しないので、ツールを渡していたなら
+				// 取り置きを消さずに期限まで数える (使われたかもしれないため)。
+				if len(tools) > 0 {
+					g.Web.markUnsettled()
+				}
 				return "", ctx.Err()
 			}
 			// 失敗した呼び出しも回数に数える。数えないと、エラーを起こし続ける
 			// 相手が上限に掛からずに呼び出しを繰り返させられる。
 			class := classifyAPIError(err)
-			if rerr := recordUsage(ctx, b.db(), usageRecord{
-				Kind: g.Kind, UserID: g.UserID, Host: g.Host, Model: s.Model, StopReason: "error:" + class,
+			// サーバー側で検索や取得が行われたか分からない失敗では、渡した
+			// 回数を使ったものとして数え、応答の無い失敗では取得した本文の分の
+			// 入力tokenも見積もって記録する (見積もりであって、実際の請求とは
+			// 異なる)。どの失敗をどう数えるかは webFailureCost を参照。
+			var used webUse
+			var estimated tokens
+			if len(tools) > 0 {
+				countUses, countTokens := webFailureCost(err)
+				if countUses {
+					used = offered(tools)
+				}
+				if countTokens {
+					estimated.Input = g.Web.estimateInput(used)
+				}
+			}
+			if rerr := recordUsage(context.WithoutCancel(ctx), b.db(), usageRecord{
+				Kind: g.Kind, UserID: g.UserID, Host: g.Host, Model: s.Model, Tokens: estimated, StopReason: "error:" + class,
+				Web: used, Reservation: g.Web.reservationID(),
 			}); rerr != nil {
+				if len(tools) > 0 {
+					g.Web.markUnsettled()
+				}
 				return "", plugin.NoRetry(rerr)
+			}
+			g.Web.add(used)
+			if len(tools) > 0 && (class == "timeout" || (class == "permanent" && isWebRejection(err))) {
+				// webを使えないまま返事を止めず、webを外して1回だけ呼び直す。
+				// 組織の設定 (Claude Console) で無効にしていると400が返る。
+				why := "webを使う呼び出しが時間内に終わらなかったため、webを使わずに呼び直します。"
+				level := "warn"
+				switch {
+				case class == "timeout":
+				case isWebDisabled(err):
+					why = "Claude APIがwebの検索・取得を受け付けなかったため、webを使わずに呼び直します。組織の設定 (Claude Console) でweb searchやweb fetchが無効になっていないか確かめてください: " + describeAPIError(err)
+					level = "error"
+				default:
+					why = "Claude APIがwebの検索・取得を含むリクエストを受け付けなかったため、webを使わずに呼び直します: " + describeAPIError(err)
+					level = "error"
+				}
+				b.logEvent(ctx, level, eventWeb, why, g.UserID, g.NoteID)
+				g.Web.withdraw()
+				restart()
+				retry = "webを外した"
+				continue
 			}
 			if class == "timeout" {
 				// timeout は再試行しない。1 回 30 秒かかるので、再試行させると
@@ -301,6 +394,7 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 			if class == "permanent" && len(images) > 0 && !imagesDropped && isImageRejection(err) {
 				b.logEvent(ctx, "warn", eventAPIError, "Claude APIが画像を含むリクエストを受け付けなかったため、画像を外して呼び直します: "+describeAPIError(err), g.UserID, g.NoteID)
 				images, prompt, imagesDropped = nil, g.PromptWithoutImages, true
+				restart()
 				retry = "Claude APIが画像を受け付けなかった"
 				continue
 			}
@@ -321,14 +415,23 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 			CacheCreation: msg.Usage.CacheCreationInputTokens,
 			CacheRead:     msg.Usage.CacheReadInputTokens,
 		}
-		if err := recordUsage(ctx, b.db(), usageRecord{
+		web := webUse{Search: msg.Usage.ServerToolUse.WebSearchRequests, Fetch: msg.Usage.ServerToolUse.WebFetchRequests}
+		// 呼んだ後の記録は、ctx が取り消されても行う。記録できないと使った
+		// 回数と費用が数えられないため。
+		if err := recordUsage(context.WithoutCancel(ctx), b.db(), usageRecord{
 			Kind: g.Kind, UserID: g.UserID, Host: g.Host, Model: s.Model, Tokens: used, StopReason: string(msg.StopReason),
+			Web: web, Reservation: g.Web.reservationID(),
 		}); err != nil {
+			if len(tools) > 0 {
+				g.Web.markUnsettled()
+			}
 			// 記録できないと費用の上限が効かなくなるので、投稿しない。
 			// 再試行もさせない (Claude を呼び直して二重に課金するだけになる)。
 			// エラーは本体が slog に残す。
 			return "", plugin.NoRetry(fmt.Errorf("claude-bot: 使った量を記録できないため投稿しません: %w", err))
 		}
+		g.Web.add(web)
+		turn = append(turn, msg)
 
 		switch msg.StopReason {
 		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
@@ -353,10 +456,39 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 					fmt.Sprintf("本文が投稿の文字数の上限 (%d文字) を超えた (%d文字) ため、投稿しませんでした。", g.PostLimit, n), g.UserID, g.NoteID)
 				return "", errSilent
 			}
+			if g.Web != nil && g.Web.settings.Citations {
+				text = appendSources(text, webSources(msg, turn, g.Prompt), g.PostLimit)
+			}
 			return text, nil
+		case anthropic.StopReasonPauseTurn:
+			// サーバー側のツールの繰り返しが上限に達して、途中で返ってきた。
+			// 返ってきた内容をそのまま付けて呼び直すと続きから始まる。
+			if len(tools) == 0 {
+				b.logEvent(ctx, "warn", eventSilenced, "ツールを渡していないのに中断 (pause_turn) が返ったため、投稿しませんでした。", g.UserID, g.NoteID)
+				return "", errSilent
+			}
+			if pauses >= maxPauseContinuations {
+				b.logEvent(ctx, "warn", eventSilenced,
+					fmt.Sprintf("webを使う途中の中断 (pause_turn) が%d回続いたため、投稿しませんでした。", pauses+1), g.UserID, g.NoteID)
+				return "", errSilent
+			}
+			if !g.Web.canResume(tools) {
+				// 続きを呼ぶと、使い切ったツールも渡すことになり、取り置いた
+				// 回数を超えうる。webを外して初めから呼び直す。
+				b.logEvent(ctx, "warn", eventWeb, "webを使う途中で中断し、取り置いた回数を使い切ったため、webを使わずに呼び直します。", g.UserID, g.NoteID)
+				g.Web.withdraw()
+				restart()
+				retry = "webの回数を使い切った"
+				continue
+			}
+			pauses++
+			paused = append(paused, rawBlocks(msg)...)
+			retry = "webを使う途中で中断した (pause_turn)"
+			continue
 		case anthropic.StopReasonMaxTokens:
 			if !shortened {
 				shortened = true
+				restart()
 				retry = "max_tokensで打ち切られた"
 				continue
 			}
@@ -392,10 +524,11 @@ func isImageRejection(err error) bool {
 	return false
 }
 
-// textOf joins the text blocks. 思考のブロック (thinking) は本文に入れない。
+// textOf joins the text blocks of the answer. 思考のブロック (thinking) と、
+// webのツールを使う前の文は本文に入れない (answerBlocks)。
 func textOf(msg *anthropic.Message) string {
 	var sb strings.Builder
-	for _, block := range msg.Content {
+	for _, block := range answerBlocks(msg) {
 		if block.Type == "text" {
 			sb.WriteString(block.Text)
 		}

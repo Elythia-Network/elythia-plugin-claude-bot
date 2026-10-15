@@ -19,6 +19,7 @@ const (
 	eventReactError = "reaction_error"
 	eventImage      = "image"
 	eventPromptLeak = "prompt_leak"
+	eventWeb        = "web"
 )
 
 // event is one line of the admin page's log.
@@ -92,6 +93,8 @@ func prune(ctx context.Context, db *sql.DB) error {
 		{`DELETE FROM scheduled_runs WHERE slot < $1`, t.AddDate(0, 0, -30)},
 		{`DELETE FROM usage_log WHERE at < $1`, t.AddDate(0, 0, -400)},
 		{`DELETE FROM bot_replies WHERE at < $1`, t.AddDate(0, 0, -90)},
+		// 取り置きは返事を作り終えたら消す。worker が落ちて残った行だけが対象。
+		{`DELETE FROM web_reservations WHERE at < $1`, t.AddDate(0, 0, -1)},
 	} {
 		if _, err := db.ExecContext(ctx, q.sql, q.before); err != nil {
 			return fmt.Errorf("prune: %w", err)

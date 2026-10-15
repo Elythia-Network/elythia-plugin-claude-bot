@@ -17,14 +17,48 @@ type usageRecord struct {
 	Model      string
 	Tokens     tokens
 	StopReason string
+	// Web is the searches and fetches Claude API did in this call (#11).
+	Web webUse
+	// Reservation is the web_reservations row this call settles. 0 なら
+	// 取り置きは無い。
+	Reservation int64
 }
 
+// webUse counts the server tool uses of one or more calls.
+type webUse struct {
+	Search int64
+	Fetch  int64
+}
+
+func (w webUse) total() int64 { return w.Search + w.Fetch }
+
 func recordUsage(ctx context.Context, db *sql.DB, r usageRecord) error {
-	_, err := db.ExecContext(ctx, `
-INSERT INTO usage_log (at, kind, user_id, host, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, stop_reason)
-VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10)`,
-		now(), r.Kind, r.UserID, r.Host, r.Model, r.Tokens.Input, r.Tokens.Output, r.Tokens.CacheCreation, r.Tokens.CacheRead, r.StopReason)
+	const insert = `
+INSERT INTO usage_log (at, kind, user_id, host, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, stop_reason, web_search_requests, web_fetch_requests)
+VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12)`
+	args := []any{now(), r.Kind, r.UserID, r.Host, r.Model, r.Tokens.Input, r.Tokens.Output, r.Tokens.CacheCreation, r.Tokens.CacheRead, r.StopReason, r.Web.Search, r.Web.Fetch}
+	if r.Reservation == 0 || r.Web.total() == 0 {
+		if _, err := db.ExecContext(ctx, insert, args...); err != nil {
+			return fmt.Errorf("record usage: %w", err)
+		}
+		return nil
+	}
+	// 使った回数の記録と、取り置きを減らすのは1つのトランザクションにする。
+	// 別々にすると、その間に取り置く返事が、どちらにも数えられていない回数を
+	// 「残り」と読んで上限を超えうる。
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("record usage: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // Commitの後は何もしない
+	if _, err := tx.ExecContext(ctx, insert, args...); err != nil {
+		return fmt.Errorf("record usage: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE web_reservations SET amount = GREATEST(amount - $2, 0) WHERE id = $1`, r.Reservation, r.Web.total()); err != nil {
+		return fmt.Errorf("settle web reservation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("record usage: %w", err)
 	}
 	return nil
@@ -51,6 +85,9 @@ type modelUsage struct {
 type periodUsage struct {
 	Calls  int64  `json:"calls"`
 	Tokens tokens `json:"tokens"`
+	// WebSearchRequests and WebFetchRequests are what Claude API did (#11).
+	WebSearchRequests int64 `json:"webSearchRequests"`
+	WebFetchRequests  int64 `json:"webFetchRequests"`
 	// CostUSD sums only the models that have a price.
 	CostUSD float64      `json:"costUsd"`
 	ByModel []modelUsage `json:"byModel"`
@@ -60,6 +97,8 @@ type periodUsage struct {
 
 // usageSince sums the calls since start, pricing them with p.
 //
+// webの検索の料金 (1回 webSearchUSD) は、モデルの単価とは別に、額に足す。
+// 取得の料金は本文のtokenとして入力に入っているので、別には足さない。
 // 単価は読むときに当てる。上書きを変えたら過去の分も新しい単価で数え直す
 // (概算なので、どの単価で数えたかを行ごとに持つより分かりやすい)。
 // Haiku 5.5 のように入力の大きさで単価が変わるモデルがあるので、
@@ -68,7 +107,8 @@ func usageSince(ctx context.Context, db *sql.DB, start time.Time, p pricer) (per
 	rows, err := db.QueryContext(ctx, `
 SELECT model,
        (input_tokens + cache_creation_tokens + cache_read_tokens) AS prompt,
-       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens
+       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       web_search_requests, web_fetch_requests
 FROM usage_log WHERE at >= $1`, start)
 	if err != nil {
 		return periodUsage{}, fmt.Errorf("usage: %w", err)
@@ -81,7 +121,8 @@ FROM usage_log WHERE at >= $1`, start)
 		var model string
 		var prompt int64
 		var t tokens
-		if err := rows.Scan(&model, &prompt, &t.Input, &t.Output, &t.CacheCreation, &t.CacheRead); err != nil {
+		var web webUse
+		if err := rows.Scan(&model, &prompt, &t.Input, &t.Output, &t.CacheCreation, &t.CacheRead, &web.Search, &web.Fetch); err != nil {
 			return periodUsage{}, fmt.Errorf("usage scan: %w", err)
 		}
 		m := byModel[model]
@@ -93,13 +134,18 @@ FROM usage_log WHERE at >= $1`, start)
 		m.Tokens.add(t)
 		out.Calls++
 		out.Tokens.add(t)
+		out.WebSearchRequests += web.Search
+		out.WebFetchRequests += web.Fetch
+		// 検索の料金はモデルの単価が無くても分かるので、全体の額には必ず足す。
+		searchCost := float64(web.Search) * webSearchUSD
+		out.CostUSD += searchCost
 		if pr, ok := p.lookup(model, prompt); ok {
-			c := cost(t, pr)
+			c := cost(t, pr) + searchCost
 			if m.CostUSD == nil {
 				m.CostUSD = new(float64)
 			}
 			*m.CostUSD += c
-			out.CostUSD += c
+			out.CostUSD += c - searchCost
 		}
 	}
 	if err := rows.Err(); err != nil {

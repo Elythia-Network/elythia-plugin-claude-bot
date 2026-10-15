@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +35,7 @@ type Settings struct {
 	Limits    LimitSettings     `json:"limits"`
 	Budget    BudgetSettings    `json:"budget"`
 	Vision    VisionSettings    `json:"vision"`
+	Web       WebSettings       `json:"web"`
 
 	// PriceOverrides replaces the built-in price of a model.
 	PriceOverrides []PriceOverride `json:"priceOverrides"`
@@ -86,6 +88,41 @@ type VisionSettings struct {
 	IncludeSensitive bool `json:"includeSensitive"`
 }
 
+// WebSettings controls the web search and web fetch server tools (#11).
+type WebSettings struct {
+	// Search offers web search. 既定はOFF。検索は1回ごとに課金されるので、
+	// 運営者が選んでONにする。
+	Search bool `json:"search"`
+	// Fetch offers web fetch. 取得したページの本文もtokenとして数えられる。
+	Fetch bool `json:"fetch"`
+	// Audience is who may use the web: "none" (only Users), "local",
+	// "followers" (people who follow the bot) or "everyone".
+	Audience string `json:"audience"`
+	// Users may use the web in addition to Audience ("@name" for local users,
+	// "@name@host" for remote ones).
+	Users []string `json:"users"`
+	// PerUserPerHour caps the searches and fetches for one person an hour.
+	// 0 means no cap.
+	PerUserPerHour int `json:"perUserPerHour"`
+	// GlobalPerHour caps the searches and fetches of the whole bot an hour.
+	// 0 means no cap.
+	GlobalPerHour int `json:"globalPerHour"`
+	// MaxUsesPerReply caps the searches and fetches for one reply.
+	MaxUsesPerReply int `json:"maxUsesPerReply"`
+	// BlockedDomains are left out of search results and never fetched.
+	BlockedDomains []string `json:"blockedDomains"`
+	// Citations appends the URLs of the pages used to the reply.
+	Citations bool `json:"citations"`
+	// MaxContentTokens bounds the text of one fetched page (max_content_tokens).
+	// 取得したページの本文は入力のtokenとして課金され、その後のサーバー側の
+	// 繰り返しのたびに読み直されるので、長いページで1回の費用が膨らまない
+	// ようにする。
+	MaxContentTokens int `json:"maxContentTokens"`
+}
+
+// enabled reports whether either tool is on.
+func (w WebSettings) enabled() bool { return w.Search || w.Fetch }
+
 // LimitSettings caps the cost. 0 means no cap.
 type LimitSettings struct {
 	PerUserPerHour int `json:"perUserPerHour"`
@@ -121,8 +158,8 @@ type PriceOverride struct {
 // メンションした投稿が外部 (Anthropic) へ送られることを、話しかける前に
 // 分かるようにしておく (issue の要件 11)。
 //
-// 画像には触れていない。「画像を見る」(#6)をONにしたら、運営者が自己紹介を
-// 書き換える前提で、管理画面とREADMEで案内する。
+// 画像とwebには触れていない。「画像を見る」(#6)や「webを使う」(#11)を
+// ONにしたら、運営者が自己紹介を書き換える前提で、管理画面とREADMEで案内する。
 const DefaultDescription = "このアカウントはbotです。メンションした投稿の本文と、そのスレッドの投稿は、返事を作るためにAnthropic社のClaude APIへ送られます。"
 
 func defaultSettings() Settings {
@@ -158,6 +195,17 @@ func defaultSettings() Settings {
 		},
 		Vision: VisionSettings{
 			MaxImages: 4,
+		},
+		Web: WebSettings{
+			Audience:        "none",
+			Users:           []string{},
+			PerUserPerHour:  10,
+			GlobalPerHour:   60,
+			MaxUsesPerReply: 3,
+			BlockedDomains:  []string{},
+			Citations:       true,
+			// 1ページ1万tokenで、ニュースの記事やブログの1本はほぼ収まる。
+			MaxContentTokens: 10000,
 		},
 		PriceOverrides: []PriceOverride{},
 	}
@@ -214,6 +262,21 @@ const (
 	// maxVisionImages は1回の返事で送る画像の数の上限の上限。1枚ずつ取りに
 	// 行くので、多すぎると1つの通知の処理が長くなる。
 	maxVisionImages = 20
+	// maxWebUsesPerReply は1回の返事で使える検索と取得の回数の上限の上限。
+	// webを使う呼び出しは1回2分、1回の返事で合わせて3分までなので、
+	// 多くしても使い切れない。
+	maxWebUsesPerReply = 10
+	// maxWebUsers は「webを使える人」の一覧の長さの上限。
+	maxWebUsers = 500
+	// maxBlockedDomains は除くドメインの数の上限。
+	maxBlockedDomains = 64
+	// maxWebPerHour は1時間あたりの回数の上限に入れられる値の上限。
+	maxWebPerHour = 100000
+	// minWebContentTokens と maxWebContentTokens は、取得したページの本文の
+	// token数の上限に入れられる値の範囲。小さすぎると本文がほぼ読めず、
+	// 大きすぎると1回の取得で費用が膨らむ。
+	minWebContentTokens = 1000
+	maxWebContentTokens = 100000
 )
 
 func oneOf(v string, allowed ...string) bool {
@@ -376,6 +439,10 @@ func (s Settings) check(maxNoteLength int) error {
 		return badRequest("送る画像の数の上限は1〜%dにしてください", maxVisionImages)
 	}
 
+	if err := s.Web.check(); err != nil {
+		return err
+	}
+
 	if len(s.PriceOverrides) > 100 {
 		return badRequest("単価の上書きは100件までです")
 	}
@@ -397,6 +464,76 @@ func (s Settings) check(maxNoteLength int) error {
 		}
 	}
 	return nil
+}
+
+var (
+	// webUserPattern is "@name" or "@name@host". 名前とホストの文字は、
+	// mention.goのleadingMentionと同じ。
+	webUserPattern = regexp.MustCompile(`^@[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?(?:@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)?$`)
+	// domainPattern is a hostname with at least one dot, without a scheme,
+	// port or path. APIは裸のTLDや1語の名前を受け付けない。web fetchは
+	// パスを付けたドメインを受け付けないので、パスは許さない。
+	domainPattern = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+)
+
+// check validates the web settings.
+func (w WebSettings) check() error {
+	if !oneOf(w.Audience, "none", "local", "followers", "everyone") {
+		return badRequest("webを使える人の範囲が不正です")
+	}
+	if len(w.Users) > maxWebUsers {
+		return badRequest("webを使える人の一覧は%d件までです", maxWebUsers)
+	}
+	for _, u := range w.Users {
+		if !webUserPattern.MatchString(u) {
+			return badRequest("webを使える人 %q は@名前か@名前@ホストの形で書いてください (国際化ドメインのホストは xn-- で始まる形で書きます)", u)
+		}
+	}
+	if w.PerUserPerHour < 0 || w.PerUserPerHour > maxWebPerHour || w.GlobalPerHour < 0 || w.GlobalPerHour > maxWebPerHour {
+		return badRequest("webを使う回数の上限は0(上限なし)〜%dにしてください", maxWebPerHour)
+	}
+	if w.MaxUsesPerReply < 1 || w.MaxUsesPerReply > maxWebUsesPerReply {
+		return badRequest("1回の返事でwebを使う回数は1〜%dにしてください", maxWebUsesPerReply)
+	}
+	if w.MaxContentTokens < minWebContentTokens || w.MaxContentTokens > maxWebContentTokens {
+		return badRequest("取得したページの本文のtoken数の上限は%d〜%dにしてください", minWebContentTokens, maxWebContentTokens)
+	}
+	if len(w.BlockedDomains) > maxBlockedDomains {
+		return badRequest("除くドメインは%d件までです", maxBlockedDomains)
+	}
+	for _, d := range w.BlockedDomains {
+		if len(d) > 253 || !domainPattern.MatchString(d) {
+			return badRequest("除くドメイン %q はexample.comのように、スキームやパスを付けずに書いてください", d)
+		}
+	}
+	return nil
+}
+
+// normalize trims the lists and lowercases what is case-insensitive. 画面で
+// 入れた空白や大文字のために保存できなくならないようにする。
+func (w *WebSettings) normalize() {
+	users := make([]string, 0, len(w.Users))
+	for _, u := range w.Users {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		// ホストは大文字小文字を区別しないので小文字にそろえる。名前は
+		// 比べるときに大文字小文字を無視する。
+		if i := strings.LastIndex(u, "@"); i > 0 {
+			u = u[:i] + strings.ToLower(u[i:])
+		}
+		users = append(users, u)
+	}
+	w.Users = users
+	domains := make([]string, 0, len(w.BlockedDomains))
+	for _, d := range w.BlockedDomains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d != "" {
+			domains = append(domains, d)
+		}
+	}
+	w.BlockedDomains = domains
 }
 
 func validateText(label, v string) error {

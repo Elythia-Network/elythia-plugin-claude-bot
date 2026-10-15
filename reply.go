@@ -22,7 +22,9 @@ func notifications(pctx plugin.Context, n plugin.Notifications) error {
 // staleClaim is how long a "processing" claim blocks another delivery.
 //
 // worker が途中で落ちた通知は、この時間が過ぎた後の再配達で取り直す。
-// 1 回の処理は Claude API の 30 秒 × 2 回程度なので、十分に長い。
+// 1 回の処理は、webを使わなければ画像の取得 (20 秒) と Claude API の 30 秒 ×
+// 3 回で 2 分弱、webを使っても webReplyBudget (3 分) と 30 秒 × 3 回で 5 分弱
+// なので、十分に長い。
 const staleClaim = 15 * time.Minute
 
 // handleNotification answers a mention or a reply to the bot.
@@ -192,14 +194,22 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 		}
 		// 下書きがある再試行ではClaudeを呼ばないので、画像もここでだけ取る。
 		vr := b.collectImages(ctx, s.Vision, note, ctxNotes, s.Reply.ContextNotes)
+		prompt := replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr)
+		// webも、Claudeを呼ぶときにだけ使えるかを決めて回数を取り置く (#11)。
+		web, err := b.planWeb(ctx, as, s.Web, note.User, note.ID, prompt)
+		if err != nil {
+			return "", err
+		}
+		defer b.releaseWeb(ctx, web)
 		text, err = b.generate(ctx, s, generation{
 			Kind:   "reply",
 			UserID: note.User.ID,
 			Host:   note.User.remoteHost(),
 			NoteID: note.ID,
 			System: s.Reply.SystemPrompt,
-			Prompt: replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr),
+			Prompt: prompt,
 			Images: vr.imageList(),
+			Web:    web,
 			// 画像を外して呼び直すときは、プロンプトも送っていない扱いに作り直す。
 			PromptWithoutImages: replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr.withoutImages()),
 			MaxChars:            s.Reply.MaxChars,

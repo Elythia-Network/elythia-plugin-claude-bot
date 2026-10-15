@@ -97,6 +97,8 @@ type claudeReply struct {
 	body   string
 	// netErr makes the round trip fail before any HTTP response.
 	netErr error
+	// delay holds the response back. 期限が先に来たら、その時点で失敗する。
+	delay time.Duration
 }
 
 // fakeClaude answers POST /v1/messages from a queue of replies.
@@ -233,6 +235,8 @@ type capturedRequest struct {
 	Header http.Header
 	Path   string
 	Body   map[string]any
+	// Deadline is how long the request had left (0 if it had no deadline).
+	Deadline time.Duration
 }
 
 func (f *fakeClaude) push(r ...claudeReply) {
@@ -249,7 +253,11 @@ func (f *fakeClaude) RoundTrip(req *http.Request) (*http.Response, error) {
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
 	f.mu.Lock()
-	f.requests = append(f.requests, capturedRequest{Header: req.Header.Clone(), Path: req.URL.Path, Body: body})
+	var left time.Duration
+	if dl, ok := req.Context().Deadline(); ok {
+		left = time.Until(dl)
+	}
+	f.requests = append(f.requests, capturedRequest{Header: req.Header.Clone(), Path: req.URL.Path, Body: body, Deadline: left})
 	var r claudeReply
 	if len(f.replies) == 0 {
 		r = claudeReply{status: 500, body: `{"type":"error","error":{"type":"api_error","message":"no reply queued in test"}}`}
@@ -260,6 +268,13 @@ func (f *fakeClaude) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.mu.Unlock()
 	if r.netErr != nil {
 		return nil, r.netErr
+	}
+	if r.delay > 0 {
+		select {
+		case <-time.After(r.delay):
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 	}
 	return &http.Response{
 		StatusCode: r.status,
@@ -321,8 +336,10 @@ type fakeAPI struct {
 	notes        map[string]map[string]any
 	conversation map[string][]map[string]any
 	// emojis maps a local emoji name to the roles that can use it.
-	emojis      map[string][]string
-	followers   map[string]bool
+	emojis    map[string][]string
+	followers map[string]bool
+	// following lists the users the bot follows (users/relation の isFollowing)。
+	following   map[string]bool
 	maxNote     int
 	createFails []int  // notes/create の応答の status を順に返す (0 は成功)
 	reactError  string // notes/reactions/create が返すエラーの code (空なら成功)
@@ -338,6 +355,7 @@ func newFakeAPI() *fakeAPI {
 		conversation: map[string][]map[string]any{},
 		emojis:       map[string][]string{},
 		followers:    map[string]bool{},
+		following:    map[string]bool{},
 		maxNote:      3000,
 		fail:         map[string]error{},
 		raw:          map[string]string{},
@@ -406,7 +424,7 @@ func (c *fakeCaller) Call(_ context.Context, endpoint string, params any) (json.
 		}
 		return reply(map[string]any{"name": p["name"], "roleIdsThatCanBeUsedThisEmojiAsReaction": roles})
 	case "users/relation":
-		return reply(map[string]any{"id": p["userId"], "isFollowed": a.followers[fmt.Sprint(p["userId"])]})
+		return reply(map[string]any{"id": p["userId"], "isFollowed": a.followers[fmt.Sprint(p["userId"])], "isFollowing": a.following[fmt.Sprint(p["userId"])]})
 	case "notes/create":
 		if len(a.createFails) > 0 {
 			st := a.createFails[0]
@@ -449,7 +467,14 @@ func note(id, userID, username, host, text, visibility string) map[string]any {
 
 func plugintestHarness(t *testing.T, db *sql.DB, api *fakeAPI, fc *fakeClaude, secrets map[string]string) *plugintest.Harness {
 	t.Helper()
-	h := plugintest.New(t).WithName(Name).WithDB(db).WithAPI(api).WithHTTPClient(&http.Client{Transport: fc})
+	return plugintestHarnessWithClient(t, db, api, &http.Client{Transport: fc}, secrets)
+}
+
+// plugintestHarnessWithClient is plugintestHarness with the host's HTTP
+// client given (本体の ctx.HTTP() の Timeout を試すため)。
+func plugintestHarnessWithClient(t *testing.T, db *sql.DB, api *fakeAPI, hc *http.Client, secrets map[string]string) *plugintest.Harness {
+	t.Helper()
+	h := plugintest.New(t).WithName(Name).WithDB(db).WithAPI(api).WithHTTPClient(hc)
 	if secrets != nil {
 		h.WithSecrets(secrets)
 	}
@@ -468,10 +493,17 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWithClientTimeout(t, 0)
+}
+
+// newEnvWithClientTimeout is newEnv whose host HTTP client has the given
+// Timeout (本体の ctx.HTTP() は30秒)。
+func newEnvWithClientTimeout(t *testing.T, timeout time.Duration) *env {
+	t.Helper()
 	db := testDB(t)
 	api := newFakeAPI()
 	fc := &fakeClaude{}
-	h := plugintestHarness(t, db, api, fc, map[string]string{secretAPIKey: "sk-ant-test-key-0000"})
+	h := plugintestHarnessWithClient(t, db, api, &http.Client{Transport: fc, Timeout: timeout}, map[string]string{secretAPIKey: "sk-ant-test-key-0000"})
 	acc := h.SeedAccount(Name, "claudebot")
 	setClock(t, time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC))
 	return &env{t: t, h: h, db: db, api: api, claude: fc, botID: acc.ID}

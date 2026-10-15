@@ -54,6 +54,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<textarea v-model="profileDescription" :class="$style.textarea" rows="4"></textarea>
 					<div :class="$style.note">メンションした投稿がAnthropicへ送られることを、利用者に分かるように書いてください。</div>
 					<div v-if="draft.vision.enabled" :class="$style.warn">「画像を見る」が有効なので、添付の画像も送られることを書いてください。</div>
+					<div v-if="draft.web.search || draft.web.fetch" :class="$style.warn">「webを使う」が有効なので、話しかけた内容をもとにwebを検索・取得することを書いてください。</div>
 				</div>
 				<div>
 					<div :class="$style.label">アイコン</div>
@@ -166,6 +167,53 @@ SPDX-License-Identifier: AGPL-3.0-only
 			</div>
 		</MkFolder>
 
+		<!-- webを使う -->
+		<MkFolder :defaultOpen="false">
+			<template #label>webを使う</template>
+			<template #suffix>{{ draft.web.search || draft.web.fetch ? '有効' : '無効' }}</template>
+			<div class="_gaps_s">
+				<MkSwitch v-model="draft.web.search">webを検索する (web search)</MkSwitch>
+				<MkSwitch v-model="draft.web.fetch">webページを取得する (web fetch)</MkSwitch>
+				<div v-if="draft.web.search || draft.web.fetch" :class="$style.warn">
+					話しかけた内容をもとに、Anthropic社のClaude APIがwebを検索・取得します。botの自己紹介の文も書き換えてください。
+				</div>
+				<div :class="$style.note">
+					検索は1回0.01ドル掛かり、取得したページの本文は入力のtokenとして数えます。取得できるのは、その返事の会話に既に出てきたURL(話しかけた投稿とスレッドの本文、検索の結果、前に取得したページの本文にあるもの)だけです。1回の返事でwebを使う時間は3分までです。使えない人や上限を超えたときは、webを使わずに返事をします。定時の投稿では使いません。
+				</div>
+				<MkSelect v-model="draft.web.audience" :items="webAudienceItems">
+					<template #label>使える人</template>
+				</MkSelect>
+				<MkInput v-model="webUsers" type="text" placeholder="@alice, @bob@remote.example">
+					<template #label>ほかに使える人 (カンマ区切り)</template>
+					<template #caption>上の範囲に加えて使える人です。このサーバーの人は@名前(このサーバーのホストを付けた@名前@ホストは一致しません)、リモートの人は@名前@ホストで書きます。国際化ドメインのホストは xn-- で始まる形で書きます。</template>
+				</MkInput>
+				<MkInput v-model="draft.web.perUserPerHour" type="number" :min="0">
+					<template #label>1人あたりの回数 (1時間、0で上限なし)</template>
+				</MkInput>
+				<MkInput v-model="draft.web.globalPerHour" type="number" :min="0">
+					<template #label>全体の回数 (1時間、0で上限なし)</template>
+					<template #caption>回数は、Claude APIが実際に行った検索と取得の回数で数えます(課金の単位と同じ)。</template>
+				</MkInput>
+				<MkInput v-model="draft.web.maxUsesPerReply" type="number" :min="1" :max="10">
+					<template #label>1回の返事で使える回数</template>
+					<template #caption>1〜10。検索と取得の合計です。両方を使うときは、この回数を検索と取得に分けて渡します。</template>
+				</MkInput>
+				<MkInput v-model="webBlockedDomains" type="text" placeholder="example.com">
+					<template #label>除くドメイン (カンマ区切り)</template>
+					<template #caption>検索の結果と取得から外します。スキームやパスは付けずに書きます。</template>
+				</MkInput>
+				<MkInput v-model="draft.web.maxContentTokens" type="number" :min="1000" :max="100000">
+					<template #label>取得したページの本文のtoken数の上限 (1ページ)</template>
+					<template #caption>1000〜100000。長いページは、ここで切ってから読みます。</template>
+				</MkInput>
+				<div v-if="draft.web.fetch" :class="$style.note">
+					取得の費用の目安(1回の返事の最大): 取得 {{ webFetches }} 回で、入力 約{{ webFetchTokens.toLocaleString() }} token<template v-if="webFetchUsd != null">(約{{ usd(webFetchUsd) }}、{{ draft.model }}の入力の単価で計算)</template>。取得したページの本文は、その後のサーバー側の繰り返しのたびに入力として読み直されるので、取得の回数の2乗に近い形で増えます。pause_turnの続きやwebを外した呼び直しでは、さらに読み直します。
+				</div>
+				<MkSwitch v-model="draft.web.citations">返事に出典のURLを付ける</MkSwitch>
+				<div :class="$style.note">付けるのは最大3件で、返事の長さとは別に数えます。投稿の文字数の上限に収まらない分は付けません。</div>
+			</div>
+		</MkFolder>
+
 		<!-- 定時の投稿 -->
 		<MkFolder :defaultOpen="false">
 			<template #label>定時の投稿</template>
@@ -245,7 +293,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 		<MkFolder :defaultOpen="true">
 			<template #label>使った量と概算の額</template>
 			<div class="_gaps_s">
-				<div :class="$style.note">額はtoken数 × 単価で計算した概算です。実際の請求とは異なることがあります。</div>
+				<div :class="$style.note">額はtoken数 × 単価に、webの検索の料金(1回0.01ドル)を足した概算です。実際の請求とは異なることがあります。</div>
 				<!-- 狭い画面でもはみ出さないよう、期間を列にして項目を縦に並べる。 -->
 				<div :class="$style.scroll">
 					<table :class="$style.table">
@@ -349,7 +397,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
-import { api, autoMaxTokens, errorMessage, fitAvatar, readAsBase64, totalTokens, usd } from './api.js';
+import { api, autoMaxTokens, errorMessage, fitAvatar, maxFetchesPerReply, readAsBase64, splitList, totalTokens, usd, webFetchTokensEstimate } from './api.js';
 import type { BotEvent, EventsResponse, PeriodUsage, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
@@ -369,6 +417,8 @@ const avatarFile = ref<File | null>(null);
 const avatarInput = ref<HTMLInputElement | null>(null);
 const deleteConfirm = ref('');
 const scheduledTimes = ref('');
+const webUsers = ref('');
+const webBlockedDomains = ref('');
 
 type Item = { label: string; value: string };
 const effortItems: Item[] = [
@@ -395,6 +445,12 @@ const visibilityItems: Item[] = [
 	{ label: 'ホーム', value: 'home' },
 	{ label: 'フォロワー', value: 'followers' },
 ];
+const webAudienceItems: Item[] = [
+	{ label: '一覧の人だけ', value: 'none' },
+	{ label: 'このサーバーの人', value: 'local' },
+	{ label: 'botのフォロワー', value: 'followers' },
+	{ label: '誰でも', value: 'everyone' },
+];
 const overLimitItems: Item[] = [
 	{ label: '何もしない (沈黙)', value: 'silent' },
 	{ label: '決まった文で断る', value: 'message' },
@@ -410,11 +466,25 @@ const kindLabels: Record<string, string> = {
 	reaction_error: 'リアクションの失敗',
 	image: '画像',
 	prompt_leak: 'プロンプトの写し',
+	web: 'web',
 };
 function kindLabel(kind: string): string {
 	return kindLabels[kind] ?? kind;
 }
 
+const webFetches = computed(() => {
+	const w = draft.value?.web;
+	return w ? maxFetchesPerReply(w.search, w.fetch, Number(w.maxUsesPerReply) || 0) : 0;
+});
+const webFetchTokens = computed(() => webFetchTokensEstimate(webFetches.value, Number(draft.value?.web.maxContentTokens) || 0));
+// 入力の単価は、上書きがあればそれを、無ければ表の値を使う (段階のあるモデルは
+// 小さい方の単価)。単価が分からなければ額は出さない。
+const webFetchUsd = computed(() => {
+	const d = draft.value;
+	if (!d || !state.value) return null;
+	const price = d.priceOverrides.find(o => o.model === d.model) ?? state.value.prices.find(p => p.model === d.model);
+	return price ? webFetchTokens.value * Number(price.input) / 1_000_000 : null;
+});
 const modelIds = computed(() => state.value?.prices.map(p => p.model) ?? []);
 const periods = computed(() => state.value ? [
 	{ label: '今日', usage: state.value.usage.today },
@@ -427,6 +497,8 @@ const usageRows = [
 	{ label: '出力', value: (u: PeriodUsage) => String(u.tokens.outputTokens) },
 	{ label: 'キャッシュ書込', value: (u: PeriodUsage) => String(u.tokens.cacheCreationTokens) },
 	{ label: 'キャッシュ読込', value: (u: PeriodUsage) => String(u.tokens.cacheReadTokens) },
+	{ label: 'webの検索', value: (u: PeriodUsage) => String(u.webSearchRequests) },
+	{ label: 'webページの取得', value: (u: PeriodUsage) => String(u.webFetchRequests) },
 	{ label: '概算の額', value: (u: PeriodUsage) => usd(u.costUsd) },
 ];
 
@@ -451,6 +523,8 @@ function apply(s: State, keepDraft = false) {
 		// 編集中の値は、保存するまでサーバーの値と分けておく。
 		draft.value = JSON.parse(JSON.stringify(s.settings)) as Settings;
 		scheduledTimes.value = s.settings.scheduled.times.join(', ');
+		webUsers.value = s.settings.web.users.join(', ');
+		webBlockedDomains.value = s.settings.web.blockedDomains.join(', ');
 	}
 	profileName.value = s.account?.name ?? '';
 	profileDescription.value = s.account?.description ?? '';
@@ -487,7 +561,9 @@ function finite(v: unknown): number {
 function saveSettings() {
 	const d = draft.value;
 	if (!d) return;
-	d.scheduled.times = scheduledTimes.value.split(/[,\s]+/).filter(t => t !== '');
+	d.scheduled.times = splitList(scheduledTimes.value);
+	d.web.users = splitList(webUsers.value);
+	d.web.blockedDomains = splitList(webBlockedDomains.value);
 	// MkInputのnumberは空欄でnullやNaNになることがある。NaNはJSONでnullになり、
 	// サーバーは今の設定の上に重ねて保存するので、nullだと前の値が黙って残る。
 	// 有限でない値はすべて0に寄せる(範囲外ならサーバーの検証で弾かれる)。
@@ -496,11 +572,16 @@ function saveSettings() {
 	const l = d.limits;
 	const b = d.budget;
 	const v = d.vision;
+	const w = d.web;
 	r.maxChars = finite(r.maxChars);
 	r.maxTokens = finite(r.maxTokens);
 	r.contextNotes = finite(r.contextNotes);
 	r.maxRoundTrips = finite(r.maxRoundTrips);
 	v.maxImages = finite(v.maxImages);
+	w.perUserPerHour = finite(w.perUserPerHour);
+	w.globalPerHour = finite(w.globalPerHour);
+	w.maxUsesPerReply = finite(w.maxUsesPerReply);
+	w.maxContentTokens = finite(w.maxContentTokens);
 	sc.intervalMinutes = finite(sc.intervalMinutes);
 	sc.maxChars = finite(sc.maxChars);
 	sc.maxTokens = finite(sc.maxTokens);
