@@ -167,6 +167,7 @@ func (b *bot) routeSaveSettings(req plugin.Request) (any, error) {
 	// 残るため。送られなかった配列だけ、今の値に戻す(nullは送られた扱い)。
 	cur := s
 	s.Scheduled.Times, s.PriceOverrides = nil, nil
+	s.Web.Users, s.Web.BlockedDomains = nil, nil
 	if err := json.Unmarshal(body.Settings, &s); err != nil {
 		return nil, badRequest("設定を読めません")
 	}
@@ -174,11 +175,21 @@ func (b *bot) routeSaveSettings(req plugin.Request) (any, error) {
 		Scheduled struct {
 			Times json.RawMessage `json:"times"`
 		} `json:"scheduled"`
+		Web struct {
+			Users          json.RawMessage `json:"users"`
+			BlockedDomains json.RawMessage `json:"blockedDomains"`
+		} `json:"web"`
 		PriceOverrides json.RawMessage `json:"priceOverrides"`
 	}
 	_ = json.Unmarshal(body.Settings, &sent) // 形は上で確かめてある
 	if sent.Scheduled.Times == nil {
 		s.Scheduled.Times = cur.Scheduled.Times
+	}
+	if sent.Web.Users == nil {
+		s.Web.Users = cur.Web.Users
+	}
+	if sent.Web.BlockedDomains == nil {
+		s.Web.BlockedDomains = cur.Web.BlockedDomains
 	}
 	if sent.PriceOverrides == nil {
 		s.PriceOverrides = cur.PriceOverrides
@@ -189,6 +200,8 @@ func (b *bot) routeSaveSettings(req plugin.Request) (any, error) {
 	if s.PriceOverrides == nil {
 		s.PriceOverrides = []PriceOverride{}
 	}
+	// normalizeはnilの一覧を空の一覧にする。
+	s.Web.normalize()
 	s.Model = strings.TrimSpace(s.Model)
 	warnings, err := s.validate(b.maxNoteLength(ctx))
 	if err != nil {

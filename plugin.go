@@ -112,4 +112,26 @@ CREATE TABLE bot_replies (
 );
 CREATE INDEX bot_replies_root ON bot_replies (root_id);
 `},
+	{Version: 2, SQL: `
+-- Claude APIが実際に行ったwebの検索と取得の回数 (#11)。応答の
+-- usage.server_tool_useの値で、課金の単位と同じ。1時間あたりの上限と、
+-- 検索の料金の見積もりに使う。
+ALTER TABLE usage_log
+	ADD COLUMN web_search_requests bigint NOT NULL DEFAULT 0,
+	ADD COLUMN web_fetch_requests  bigint NOT NULL DEFAULT 0;
+
+-- 呼び出しの前に取り置いたwebの回数。同時に来た返事が、どれも「まだ残って
+-- いる」と読んで上限を超えないよう、呼ぶ前に残りから取り置き、呼んだ後に
+-- 実際の回数で精算して消す。worker が途中で落ちて残った行は、古くなったら
+-- 数えない (webReservationTTL)。
+CREATE TABLE web_reservations (
+	id      bigserial PRIMARY KEY,
+	at      timestamptz NOT NULL,
+	user_id text NOT NULL,
+	amount  integer NOT NULL
+);
+CREATE INDEX web_reservations_at ON web_reservations (at);
+-- 全体の1時間の回数を数えるときに、webを使った行だけを読む。
+CREATE INDEX usage_log_web_at ON usage_log (at) WHERE web_search_requests > 0 OR web_fetch_requests > 0;
+`},
 }

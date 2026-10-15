@@ -65,6 +65,18 @@ export type Settings = {
 		includeThread: boolean;
 		includeSensitive: boolean;
 	};
+	web: {
+		search: boolean;
+		fetch: boolean;
+		audience: string;
+		users: string[];
+		perUserPerHour: number;
+		globalPerHour: number;
+		maxUsesPerReply: number;
+		blockedDomains: string[];
+		citations: boolean;
+		maxContentTokens: number;
+	};
 	priceOverrides: PriceOverride[];
 };
 
@@ -78,6 +90,8 @@ export type Tokens = {
 export type PeriodUsage = {
 	calls: number;
 	tokens: Tokens;
+	webSearchRequests: number;
+	webFetchRequests: number;
 	costUsd: number;
 	byModel: { model: string; calls: number; tokens: Tokens; costUsd: number | null }[];
 	unpriced: string[];
@@ -135,6 +149,29 @@ export type State = {
 
 export function totalTokens(t: Tokens): number {
 	return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens;
+}
+
+/** Splits a list typed in a text box (commas, spaces or new lines). */
+export function splitList(v: string): string[] {
+	return v.split(/[,\s]+/).filter(t => t !== '');
+}
+
+/**
+ * Estimates the input tokens the fetched pages of one reply can take, at
+ * most: each page is read again by every later step of the server-side loop,
+ * so n pages of t tokens add up to t * n * (n + 1) / 2.
+ */
+export function webFetchTokensEstimate(fetches: number, maxContentTokens: number): number {
+	return maxContentTokens * fetches * (fetches + 1) / 2;
+}
+
+/**
+ * The most fetches one reply can make. web.go の splitWebUses と同じ分け方
+ * (両方を使うときは、URLがあれば取得に多めに分ける)。
+ */
+export function maxFetchesPerReply(search: boolean, fetch: boolean, maxUses: number): number {
+	if (!fetch) return 0;
+	return search ? Math.ceil(maxUses / 2) : maxUses;
 }
 
 export function usd(v: number): string {
