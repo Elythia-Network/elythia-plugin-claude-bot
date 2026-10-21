@@ -52,7 +52,7 @@ jobs:
 
     env:
       TEST_DB_HOST: localhost
-      TEST_DB_PORT: 5432
+      TEST_DB_PORT: 1
       TEST_DB_NAME: misskey_test
       TEST_DB_USER: mk
       TEST_DB_PASS: mk
