@@ -238,7 +238,7 @@ export async function fitAvatar(file: File): Promise<{ blob: Blob; filename: str
 	}
 	try {
 		const scale = Math.min(1, avatarEdge / Math.max(bitmap.width, bitmap.height));
-		const canvas = document.createElement('canvas');
+		const canvas = window.document.createElement('canvas');
 		canvas.width = Math.max(1, Math.round(bitmap.width * scale));
 		canvas.height = Math.max(1, Math.round(bitmap.height * scale));
 		const g = canvas.getContext('2d');
