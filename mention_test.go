@@ -92,7 +92,7 @@ func TestReply_LeadingMentionFromClaudeIsNotDoubled(t *testing.T) {
 	require.Len(t, creates, 1)
 	text := creates[0].Params["text"].(string)
 	assert.Equal(t, "@alice@remote.example こんにちは", text)
-	assert.NotContains(t, text, "​")
+	assert.NotContains(t, text, "\u200b")
 }
 
 // 宛先でない人へのメンションが本文の頭にあっても、外さずに無効にする (#4)。
@@ -102,7 +102,7 @@ func TestReply_LeadingMentionOfSomeoneElseIsDefanged(t *testing.T) {
 	e.api.notes["n1"] = note("n1", "alice", "alice", "remote.example", "hi", "public")
 	require.NoError(t, e.mention("x", "n1"))
 	text := e.api.callsTo("notes/create")[0].Params["text"].(string)
-	assert.Equal(t, "@alice@remote.example @​victim@remote.example さんにも聞いてみて", text)
+	assert.Equal(t, "@alice@remote.example @\u200bvictim@remote.example さんにも聞いてみて", text)
 }
 
 // 宛先の後に続くコードブロックの中のメンションも無効にし、コードブロックは
@@ -114,7 +114,7 @@ func TestReply_CodeBlockAfterRecipientIsSafe(t *testing.T) {
 	e.api.notes["n1"] = note("n1", "alice", "alice", "remote.example", "hi", "public")
 	require.NoError(t, e.mention("x", "n1"))
 	text := e.api.callsTo("notes/create")[0].Params["text"].(string)
-	assert.Equal(t, "@alice@remote.example\n```\n@​victim@evil.example\n```", text)
+	assert.Equal(t, "@alice@remote.example\n```\n@\u200bvictim@evil.example\n```", text)
 }
 
 // プロンプトに渡す自分の過去の返事からは、こちらで付けた宛先を外す (#4)。
@@ -157,6 +157,6 @@ func TestReply_RetriedDraftIsDefangedAgain(t *testing.T) {
 	require.NoError(t, e.mention("x", "n1"))
 	creates := e.api.callsTo("notes/create")
 	require.Len(t, creates, 2)
-	assert.Equal(t, "@alice@remote.example https://a.example/*@​bob", creates[1].Params["text"])
+	assert.Equal(t, "@alice@remote.example https://a.example/*@\u200bbob", creates[1].Params["text"])
 	assert.Len(t, e.claude.calls(), 1, "下書きを使い、Claude は呼び直さない")
 }
