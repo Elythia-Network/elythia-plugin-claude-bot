@@ -468,6 +468,7 @@ const kindLabels: Record<string, string> = {
 	prompt_leak: 'プロンプトの写し',
 	web: 'web',
 };
+
 function kindLabel(kind: string): string {
 	return kindLabels[kind] ?? kind;
 }

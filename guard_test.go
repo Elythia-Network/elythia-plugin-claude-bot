@@ -20,7 +20,7 @@ func TestLeaksSystemPrompt(t *testing.T) {
 	short := string(prompt[5 : 5+39])
 
 	spaced := strings.Join(strings.Split(run, ""), " ")
-	zw := strings.Join(strings.Split(run, ""), "​")
+	zw := strings.Join(strings.Split(run, ""), "\u200b")
 	upper := "SYSTEM: you are the guide of THIS SERVER. ANSWER BRIEFLY, OK?"
 	ascii := "system: you are the guide of this server. answer briefly, ok?"
 	fullwidth := "ＳＹＳＴＥＭ：　ｙｏｕ　ａｒｅ　ｔｈｅ　ｇｕｉｄｅ　ｏｆ　ｔｈｉｓ　ｓｅｒｖｅｒ．　ａｎｓｗｅｒ　ｂｒｉｅｆｌｙ，　ｏｋ？"
