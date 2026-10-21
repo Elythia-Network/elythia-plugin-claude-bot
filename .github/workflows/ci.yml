@@ -10,6 +10,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 本体の版は固定したまま、新しく公開された脆弱性 (govulncheck) に気付くため
+  # に週 1 回回す。
+  schedule:
+    - cron: "0 3 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -17,7 +21,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # 取り消すのは PR だけ。main の push を取り消すと、そのコミットの結果が残らない。
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # 前提にする本体の版。**このプラグインだけは develop の最新にする。** 本体の
@@ -29,6 +34,32 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mk
+          POSTGRES_PASSWORD: mk
+          POSTGRES_DB: misskey_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DB_HOST: localhost
+      TEST_DB_PORT: 5432
+      TEST_DB_NAME: misskey_test
+      TEST_DB_USER: mk
+      TEST_DB_PASS: mk
+      # このプラグインのテストは、DB に繋がらないと skip する作り (dbUnavailable)。
+      # この変数があると skip せずに落ちる。無いと DB のテストが全部 skip され、
+      # CI は緑のまま中身をほとんど見なくなる。
+      MK_PLUGIN_TESTS_REQUIRE_DB: "1"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,10 +184,10 @@ jobs:
       - name: govulncheck
         working-directory: elythia/plugins/${{ env.PLUGIN_NAME }}
         # **このプラグインのパッケージだけを見る。** 本体を丸ごと見ると、本体の
-        # 依存の脆弱性で落ちる (2.0.0 では golang.org/x/net の 4 件。プラグイン
-        # からは呼ばれていない)。本体の脆弱性は本体の CI が見る。
+        # 依存の脆弱性で落ちうる (例えば 2.0.0 では golang.org/x/net の 4 件。
+        # プラグインからは呼ばれていない)。本体の脆弱性は本体の CI が見る。
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           GOOS=linux "$(go env GOPATH)/bin/govulncheck" ./...
 
   frontend:
@@ -214,10 +245,11 @@ jobs:
       # `src/**` だけを対象にし、設定ファイルのディレクトリの外のファイルは
       # 無視するので、plugins/ の下のままでは何も検査しない。行番号は元の
       # ファイルと同じで、パスだけが src/_plugin_lint/<名前>/ になる。
+      # 警告は本体の CI と同じく落とさないので、--quiet でエラーだけを出す。
       - name: eslint
         working-directory: elythia/frontend/packages/frontend
         run: |
           dest="src/_plugin_lint/$PLUGIN_NAME"
           mkdir -p "$(dirname "$dest")"
           cp -R "../../../plugins/$PLUGIN_NAME/frontend" "$dest"
-          pnpm exec eslint "$dest"
+          pnpm exec eslint --quiet "$dest"

@@ -211,16 +211,16 @@ Claude APIは公式のGo SDK(`github.com/anthropics/anthropic-sdk-go`)で呼ぶ�
 
 ### CI
 
-`.github/workflows/ci.yml` が、push と PR のたびに次の 4 つを回す。本体のリポジトリの workflow は使わず、このリポジトリだけで完結する。
+`.github/workflows/ci.yml` が、main への push、PR、毎週 1 回の定期実行で次の 4 つを回す。本体のリポジトリの workflow は使わず、このリポジトリだけで完結する。
 
 | job | 見るもの |
 |---|---|
-| `test` | `go test -race`、カバレッジの値、このプラグインを組み込んだ `elythia` のビルド |
+| `test` | `go test -race` (PostgreSQL を立てる。DB に繋がらないときは `MK_PLUGIN_TESTS_REQUIRE_DB` で skip せずに落とす)、カバレッジの値、このプラグインを組み込んだ `elythia` のビルド |
 | `lint` | gofmt、`go vet`、golangci-lint (本体の `.golangci.yml`)、actionlint |
 | `vulncheck` | govulncheck (このプラグインのパッケージだけ) |
 | `frontend` | 本体の frontend の typecheck (このプラグインの `.vue` / `.ts` を含む)、このプラグインの `frontend/` の eslint |
 
-本体は `ELYTHIA_REF` に書いた版を取ってきて、このリポジトリを `plugins/claude-bot` に置いて組む。**このプラグインだけは、本体の `develop` の最新を前提にする。** 本体の 2.0.0 の後に足した `plugin/` の機能 (`plugin.Account` など。本体の #3468〜#3470) を使っていて、リリースされた版では組めないため。そのため、本体の `develop` の変更で CI が落ちることがある。それらの機能を含む本体のリリースが出たら、`ELYTHIA_REF` をその版にする。Go の版はこのリポジトリの `go.mod` で決まる (本体の `go.mod` より新しくてよい)。
+本体は `ELYTHIA_REF` に書いた版を取ってきて、このリポジトリを `plugins/claude-bot` に置いて組む。**このプラグインだけは、本体の `develop` の最新を前提にする。** 本体の 2.0.0 の後に足した `plugin/` の機能 (`plugin.Account` など。本体の #3468〜#3470) を使っていて、リリースされた版では組めないため。そのため、本体の `develop` の変更で CI が落ちることがある。それらの機能を含む本体のリリースが出たら、`ELYTHIA_REF` をその版にする。Go の版はこのリポジトリの `go.mod` で決まる。本体の `go.mod` より新しくてよく、`go.work` は 2 つの新しい方の版で組む。
 
 ## ライセンス
 
