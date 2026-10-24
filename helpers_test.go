@@ -343,6 +343,8 @@ type fakeAPI struct {
 	maxNote     int
 	createFails []int  // notes/create の応答の status を順に返す (0 は成功)
 	reactError  string // notes/reactions/create が返すエラーの code (空なら成功)
+	// createdIDs are the IDs notes/create returns in order. 尽きたら "created"。
+	createdIDs []string
 	// fail makes an endpoint return the given error.
 	fail map[string]error
 	// raw makes an endpoint return the given body as is.
@@ -433,7 +435,11 @@ func (c *fakeCaller) Call(_ context.Context, endpoint string, params any) (json.
 				return nil, apiErr(endpoint, st, "TEST_FAILURE")
 			}
 		}
-		return reply(map[string]any{"createdNote": map[string]any{"id": "created"}})
+		id := "created"
+		if len(a.createdIDs) > 0 {
+			id, a.createdIDs = a.createdIDs[0], a.createdIDs[1:]
+		}
+		return reply(map[string]any{"createdNote": map[string]any{"id": id}})
 	case "notes/reactions/create":
 		if a.reactError != "" {
 			return nil, apiErr(endpoint, 400, a.reactError)

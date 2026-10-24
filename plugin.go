@@ -134,4 +134,17 @@ CREATE INDEX web_reservations_at ON web_reservations (at);
 -- 全体の1時間の回数を数えるときに、webを使った行だけを読む。
 CREATE INDEX usage_log_web_at ON usage_log (at) WHERE web_search_requests > 0 OR web_fetch_requests > 0;
 `},
+	{Version: 3, SQL: `
+-- 相手ごとに覚えたやり取り (#17)。exchanges は古い順の配列で、相手の投稿と
+-- botの返事の組を持つ。1人1行にして、追記を1文のupsertで行う。同じ相手から
+-- 同時に届いた返事でも、行のロックで順に足されて落ちない。
+-- acct は管理画面に出すための、最後に話したときの @名前(@ホスト)。
+CREATE TABLE memories (
+	user_id    text PRIMARY KEY,
+	acct       text NOT NULL,
+	exchanges  jsonb NOT NULL,
+	updated_at timestamptz NOT NULL
+);
+CREATE INDEX memories_updated_at ON memories (updated_at);
+`},
 }

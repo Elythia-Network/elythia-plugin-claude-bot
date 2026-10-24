@@ -45,6 +45,12 @@ type generation struct {
 	NoteID string
 	System string
 	Prompt string
+	// SourcePrompt is the part of Prompt the recipient can already see (the
+	// thread). その中のURLは出典にしない。空ならPromptを使う。
+	//
+	// 会話の記憶 (#17) は今のスレッドに見えていないので、記憶にあるURLを
+	// 出典から外さないよう、スレッドの部分だけを渡す。
+	SourcePrompt string
 	// MaxChars is told to the model as the length limit.
 	MaxChars int
 	// MaxTokens is the override; 0 means automatic.
@@ -457,7 +463,11 @@ func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, e
 				return "", errSilent
 			}
 			if g.Web != nil && g.Web.settings.Citations {
-				text = appendSources(text, webSources(msg, turn, g.Prompt), g.PostLimit)
+				seen := g.SourcePrompt
+				if seen == "" {
+					seen = g.Prompt
+				}
+				text = appendSources(text, webSources(msg, turn, seen), g.PostLimit)
 			}
 			return text, nil
 		case anthropic.StopReasonPauseTurn:
