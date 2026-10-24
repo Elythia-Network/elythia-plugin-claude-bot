@@ -55,6 +55,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<div :class="$style.note">メンションした投稿がAnthropicへ送られることを、利用者に分かるように書いてください。</div>
 					<div v-if="draft.vision.enabled" :class="$style.warn">「画像を見る」が有効なので、添付の画像も送られることを書いてください。</div>
 					<div v-if="draft.web.search || draft.web.fetch" :class="$style.warn">「webを使う」が有効なので、話しかけた内容をもとにwebを検索・取得することを書いてください。</div>
+					<div v-if="draft.memory.enabled" :class="$style.warn">「会話を覚える」が有効なので、やり取りを保存して以後の返事に使うことを書いてください。</div>
 				</div>
 				<div>
 					<div :class="$style.label">アイコン</div>
@@ -214,6 +215,28 @@ SPDX-License-Identifier: AGPL-3.0-only
 			</div>
 		</MkFolder>
 
+		<!-- 会話を覚える -->
+		<MkFolder :defaultOpen="false">
+			<template #label>会話を覚える</template>
+			<template #suffix>{{ draft.memory.enabled ? '有効' : '無効' }}</template>
+			<div class="_gaps_s">
+				<MkSwitch v-model="draft.memory.enabled">やり取りを覚えて、同じ相手への次の返事に使う</MkSwitch>
+				<div v-if="draft.memory.enabled" :class="$style.warn">
+					話しかけた人の投稿とbotの返事を、このサーバーに保存します。botの自己紹介の文も書き換えてください。
+				</div>
+				<div :class="$style.note">
+					覚えるのは、返事の公開範囲がパブリックかホームで、連合しない設定でないやり取りだけです。覚えた内容は、その人自身への返事にだけ使います。投稿が消されても、覚えた内容は消えません(下の「覚えている会話」から消せます)。
+				</div>
+				<MkSelect v-model="draft.memory.audience" :items="memoryAudienceItems">
+					<template #label>覚える相手</template>
+				</MkSelect>
+				<MkInput v-model="draft.memory.keepRecent" type="number" :min="1" :max="20">
+					<template #label>覚えておくやり取りの数</template>
+					<template #caption>1〜20。新しい方から、この数だけを残して返事に渡します。1件は相手の投稿とbotの返事をそれぞれ1000文字までにして残すので、数を増やすほど返事の入力のtokenが増えます。</template>
+				</MkInput>
+			</div>
+		</MkFolder>
+
 		<!-- 定時の投稿 -->
 		<MkFolder :defaultOpen="false">
 			<template #label>定時の投稿</template>
@@ -369,6 +392,45 @@ SPDX-License-Identifier: AGPL-3.0-only
 			</div>
 		</MkFolder>
 
+		<!-- 覚えている会話。話しかけた人の投稿の本文が入るので、管理者にだけ出す。 -->
+		<MkFolder v-if="state.canEdit" :defaultOpen="false">
+			<template #label>覚えている会話</template>
+			<template #suffix>{{ memoriesTotal }} 人</template>
+			<div class="_gaps_s">
+				<div v-if="memoriesError" :class="$style.error">{{ memoriesError }}</div>
+				<div v-if="memories.length === 0" :class="$style.note">覚えている会話はありません。</div>
+				<template v-else>
+					<div v-if="memoriesTotal > memories.length" :class="$style.note">新しい方から{{ memories.length }}人を出しています。</div>
+					<MkFolder v-for="m in memories" :key="m.userId" :defaultOpen="false" @opened="openMemory(m.userId)" @closed="openMemories.delete(m.userId)">
+						<template #label>{{ m.acct }}</template>
+						<template #suffix>{{ m.count }} 件</template>
+						<div class="_gaps_s">
+							<div v-if="memoryErrors[m.userId]" :class="$style.error">{{ memoryErrors[m.userId] }}</div>
+							<MkLoading v-else-if="!memoryDetails[m.userId]"/>
+							<div v-for="(ex, i) in memoryDetails[m.userId] ?? []" :key="i" :class="$style.message">
+								<div :class="$style.note">{{ new Date(ex.at).toLocaleString() }} (投稿 {{ ex.noteId }}<template v-if="ex.replyId">、返事 {{ ex.replyId }}</template>)</div>
+								<div :class="$style.pre">相手: {{ ex.user }}</div>
+								<div :class="$style.pre">bot: {{ ex.bot }}</div>
+							</div>
+							<div class="_buttons">
+								<MkButton inline danger :disabled="busy" @click="forgetMemory(m.userId)">この人の記憶を消す</MkButton>
+							</div>
+						</div>
+					</MkFolder>
+					<div v-if="!confirmForgetAll" class="_buttons">
+						<MkButton danger :disabled="busy" @click="confirmForgetAll = true">全員の記憶を消す</MkButton>
+					</div>
+					<template v-else>
+						<div :class="$style.warn">{{ memoriesTotal }}人分の記憶をすべて消します。元に戻せません。</div>
+						<div class="_buttons">
+							<MkButton danger :disabled="busy" @click="forgetAllMemories">消す</MkButton>
+							<MkButton :disabled="busy" @click="confirmForgetAll = false">やめる</MkButton>
+						</div>
+					</template>
+				</template>
+			</div>
+		</MkFolder>
+
 		<!-- 記録。話しかけた人のIDやAPIのエラーの本文が入るので、管理者にだけ出す。 -->
 		<MkFolder v-if="state.canEdit" :defaultOpen="false">
 			<template #label>記録</template>
@@ -398,11 +460,20 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, fitAvatar, maxFetchesPerReply, readAsBase64, splitList, totalTokens, usd, webFetchTokensEstimate } from './api.js';
-import type { BotEvent, EventsResponse, PeriodUsage, Settings, State } from './api.js';
+import type { BotEvent, EventsResponse, MemoriesResponse, MemoryExchange, MemoryResponse, MemorySummary, PeriodUsage, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
 const events = ref<BotEvent[]>([]);
 const eventsError = ref('');
+const memories = ref<MemorySummary[]>([]);
+const memoriesTotal = ref(0);
+const memoriesError = ref('');
+const confirmForgetAll = ref(false);
+// 開いた人のやり取りの本文。一覧には件数しか来ないので、開いたときに読む。
+const memoryDetails = ref<Record<string, MemoryExchange[]>>({});
+const memoryErrors = ref<Record<string, string>>({});
+// 開いている人。一覧を読み直したときに、開いている人の本文だけを読み直す。
+const openMemories = new Set<string>();
 const draft = ref<Settings | null>(null);
 const loadError = ref('');
 const saveError = ref('');
@@ -451,6 +522,10 @@ const webAudienceItems: Item[] = [
 	{ label: 'botのフォロワー', value: 'followers' },
 	{ label: '誰でも', value: 'everyone' },
 ];
+const memoryAudienceItems: Item[] = [
+	{ label: 'このサーバーの人だけ', value: 'local' },
+	{ label: '話しかけられる人すべて', value: 'everyone' },
+];
 const overLimitItems: Item[] = [
 	{ label: '何もしない (沈黙)', value: 'silent' },
 	{ label: '決まった文で断る', value: 'message' },
@@ -467,6 +542,7 @@ const kindLabels: Record<string, string> = {
 	image: '画像',
 	prompt_leak: 'プロンプトの写し',
 	web: 'web',
+	memory: '記憶',
 };
 
 function kindLabel(kind: string): string {
@@ -513,6 +589,76 @@ async function loadEvents() {
 	}
 }
 
+// 覚えている会話も、記録と同じく管理者だけが読める別のルートにある。
+function applyMemories(res: MemoriesResponse) {
+	memories.value = res.memories;
+	memoriesTotal.value = res.total;
+	memoriesError.value = '';
+	// 一覧を読み直したら、開いている人の本文も読み直す (件数と食い違わないように)。
+	// 折り畳みは開いたままなので、opened は再び来ない。消えた人の分は捨てる。
+	memoryDetails.value = {};
+	memoryErrors.value = {};
+	for (const userId of [...openMemories]) {
+		if (listed(userId)) void loadMemory(userId);
+		else openMemories.delete(userId);
+	}
+}
+
+function listed(userId: string): boolean {
+	return memories.value.some(m => m.userId === userId);
+}
+
+function openMemory(userId: string) {
+	openMemories.add(userId);
+	void loadMemory(userId);
+}
+
+async function loadMemory(userId: string) {
+	try {
+		const res = await api<MemoryResponse>('admin/memories/show', { userId });
+		// 読んでいる間に消した人の本文は、遅れて届いても書き戻さない。
+		if (!listed(userId)) return;
+		memoryDetails.value = { ...memoryDetails.value, [userId]: res.exchanges };
+		const errors = { ...memoryErrors.value };
+		delete errors[userId];
+		memoryErrors.value = errors;
+	} catch (err) {
+		if (!listed(userId)) return;
+		memoryErrors.value = { ...memoryErrors.value, [userId]: errorMessage(err) };
+	}
+}
+
+async function loadMemories() {
+	try {
+		applyMemories(await api<MemoriesResponse>('admin/memories'));
+	} catch (err) {
+		memoriesError.value = errorMessage(err);
+	}
+}
+
+// 失敗は「覚えている会話」の中に出す。設定の保存のエラーの欄は、この折り畳みより
+// 上にあって見えないため。
+async function deleteMemories(params: Record<string, unknown>) {
+	busy.value = true;
+	memoriesError.value = '';
+	try {
+		applyMemories(await api<MemoriesResponse>('admin/memories/delete', params));
+	} catch (err) {
+		memoriesError.value = errorMessage(err);
+	} finally {
+		busy.value = false;
+	}
+}
+
+function forgetMemory(userId: string) {
+	return deleteMemories({ userId });
+}
+
+async function forgetAllMemories() {
+	await deleteMemories({ all: true });
+	confirmForgetAll.value = false;
+}
+
 // keepDraft が true なら、編集中の設定を残す。プロフィールやアカウントの
 // 操作で、保存していない設定の変更を消さないため。
 function apply(s: State, keepDraft = false) {
@@ -529,7 +675,10 @@ function apply(s: State, keepDraft = false) {
 	}
 	profileName.value = s.account?.name ?? '';
 	profileDescription.value = s.account?.description ?? '';
-	if (s.canEdit) void loadEvents();
+	if (s.canEdit) {
+		void loadEvents();
+		void loadMemories();
+	}
 }
 
 async function load() {
@@ -579,6 +728,7 @@ function saveSettings() {
 	r.contextNotes = finite(r.contextNotes);
 	r.maxRoundTrips = finite(r.maxRoundTrips);
 	v.maxImages = finite(v.maxImages);
+	d.memory.keepRecent = finite(d.memory.keepRecent);
 	w.perUserPerHour = finite(w.perUserPerHour);
 	w.globalPerHour = finite(w.globalPerHour);
 	w.maxUsesPerReply = finite(w.maxUsesPerReply);
@@ -736,6 +886,12 @@ onMounted(load);
 
 .message {
 	white-space: normal !important;
+}
+
+// 投稿の本文の改行を残す。
+.pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 }
 
 // 表が画面の幅を超えるときは、ページ全体ではなく表の中だけを横に動かす。

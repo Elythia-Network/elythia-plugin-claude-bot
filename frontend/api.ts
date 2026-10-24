@@ -77,6 +77,11 @@ export type Settings = {
 		citations: boolean;
 		maxContentTokens: number;
 	};
+	memory: {
+		enabled: boolean;
+		audience: string;
+		keepRecent: number;
+	};
 	priceOverrides: PriceOverride[];
 };
 
@@ -118,6 +123,35 @@ export type BotEvent = {
 /** Response of admin/events (administrators only). */
 export type EventsResponse = {
 	events: BotEvent[];
+};
+
+/** One remembered pair of a note and the bot's reply. */
+export type MemoryExchange = {
+	noteId: string;
+	replyId: string;
+	user: string;
+	bot: string;
+	at: string;
+};
+
+/** One remembered person in the list. やり取りの本文は admin/memories/show で読む。 */
+export type MemorySummary = {
+	userId: string;
+	acct: string;
+	updatedAt: string;
+	count: number;
+};
+
+/** Response of admin/memories and admin/memories/delete (administrators only). */
+export type MemoriesResponse = {
+	memories: MemorySummary[];
+	total: number;
+};
+
+/** Response of admin/memories/show (administrators only). */
+export type MemoryResponse = {
+	userId: string;
+	exchanges: MemoryExchange[];
 };
 
 export type PriceRow = Price & {

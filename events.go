@@ -20,6 +20,7 @@ const (
 	eventImage      = "image"
 	eventPromptLeak = "prompt_leak"
 	eventWeb        = "web"
+	eventMemory     = "memory"
 )
 
 // event is one line of the admin page's log.

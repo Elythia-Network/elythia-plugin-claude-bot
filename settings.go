@@ -36,6 +36,7 @@ type Settings struct {
 	Budget    BudgetSettings    `json:"budget"`
 	Vision    VisionSettings    `json:"vision"`
 	Web       WebSettings       `json:"web"`
+	Memory    MemorySettings    `json:"memory"`
 
 	// PriceOverrides replaces the built-in price of a model.
 	PriceOverrides []PriceOverride `json:"priceOverrides"`
@@ -120,6 +121,26 @@ type WebSettings struct {
 	MaxContentTokens int `json:"maxContentTokens"`
 }
 
+// MemorySettings controls remembering the exchanges with each person (#17).
+type MemorySettings struct {
+	// Enabled records the exchanges and sends them with later replies. 既定は
+	// OFF。話しかけた内容をサーバーに残し、以後の返事にも使うことになるので、
+	// 運営者が選んでONにする。
+	Enabled bool `json:"enabled"`
+	// Audience is whose exchanges are remembered: "local" or "everyone".
+	Audience string `json:"audience"`
+	// KeepRecent is how many recent exchanges are kept and sent.
+	KeepRecent int `json:"keepRecent"`
+}
+
+// enabledFor reports whether the exchanges with u are remembered and used.
+func (m MemorySettings) enabledFor(u userLite) bool {
+	if !m.Enabled {
+		return false
+	}
+	return m.Audience == "everyone" || u.isLocal()
+}
+
 // enabled reports whether either tool is on.
 func (w WebSettings) enabled() bool { return w.Search || w.Fetch }
 
@@ -158,8 +179,9 @@ type PriceOverride struct {
 // メンションした投稿が外部 (Anthropic) へ送られることを、話しかける前に
 // 分かるようにしておく (issue の要件 11)。
 //
-// 画像とwebには触れていない。「画像を見る」(#6)や「webを使う」(#11)を
-// ONにしたら、運営者が自己紹介を書き換える前提で、管理画面とREADMEで案内する。
+// 画像とweb、会話の記憶には触れていない。「画像を見る」(#6)や「webを使う」(#11)、
+// 「会話を覚える」(#17)をONにしたら、運営者が自己紹介を書き換える前提で、
+// 管理画面とREADMEで案内する。
 const DefaultDescription = "このアカウントはbotです。メンションした投稿の本文と、そのスレッドの投稿は、返事を作るためにAnthropic社のClaude APIへ送られます。"
 
 func defaultSettings() Settings {
@@ -206,6 +228,10 @@ func defaultSettings() Settings {
 			Citations:       true,
 			// 1ページ1万tokenで、ニュースの記事やブログの1本はほぼ収まる。
 			MaxContentTokens: 10000,
+		},
+		Memory: MemorySettings{
+			Audience:   "local",
+			KeepRecent: 5,
 		},
 		PriceOverrides: []PriceOverride{},
 	}
@@ -277,6 +303,9 @@ const (
 	// 大きすぎると1回の取得で費用が膨らむ。
 	minWebContentTokens = 1000
 	maxWebContentTokens = 100000
+	// maxMemoryKeepRecent は覚えておくやり取りの数の上限。1件は最大で
+	// maxMemoryChars × 2 文字なので、返事の入力が膨らみすぎない数にする。
+	maxMemoryKeepRecent = 20
 )
 
 func oneOf(v string, allowed ...string) bool {
@@ -441,6 +470,13 @@ func (s Settings) check(maxNoteLength int) error {
 
 	if err := s.Web.check(); err != nil {
 		return err
+	}
+
+	if !oneOf(s.Memory.Audience, "local", "everyone") {
+		return badRequest("会話を覚える相手の範囲が不正です")
+	}
+	if s.Memory.KeepRecent < 1 || s.Memory.KeepRecent > maxMemoryKeepRecent {
+		return badRequest("覚えておくやり取りの数は1〜%dにしてください", maxMemoryKeepRecent)
 	}
 
 	if len(s.PriceOverrides) > 100 {

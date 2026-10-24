@@ -3,6 +3,7 @@ package claudebot
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -194,28 +195,37 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 		}
 		// 下書きがある再試行ではClaudeを呼ばないので、画像もここでだけ取る。
 		vr := b.collectImages(ctx, s.Vision, note, ctxNotes, s.Reply.ContextNotes)
-		prompt := replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr)
+		mem, err := b.recallFor(ctx, s.Memory, note, promptThread(ctxNotes, s.Reply.ContextNotes))
+		if err != nil {
+			return "", err
+		}
+		threadPrompt := replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr)
+		prompt := memoryPrompt(mem, note.User, s.location(), len(vr.imageList()) > 0) + threadPrompt
 		// webも、Claudeを呼ぶときにだけ使えるかを決めて回数を取り置く (#11)。
-		web, err := b.planWeb(ctx, as, s.Web, note.User, note.ID, prompt)
+		// URLがあるかは今のスレッドだけで見る。記憶には前の返事の出典のURLが
+		// 残るので、記憶まで見ると、URLの無い質問でも取得に多く配ってしまう。
+		web, err := b.planWeb(ctx, as, s.Web, note.User, note.ID, threadPrompt)
 		if err != nil {
 			return "", err
 		}
 		defer b.releaseWeb(ctx, web)
 		text, err = b.generate(ctx, s, generation{
-			Kind:   "reply",
-			UserID: note.User.ID,
-			Host:   note.User.remoteHost(),
-			NoteID: note.ID,
-			System: s.Reply.SystemPrompt,
-			Prompt: prompt,
-			Images: vr.imageList(),
-			Web:    web,
+			Kind:         "reply",
+			UserID:       note.User.ID,
+			Host:         note.User.remoteHost(),
+			NoteID:       note.ID,
+			System:       s.Reply.SystemPrompt,
+			Prompt:       prompt,
+			SourcePrompt: threadPrompt,
+			Images:       vr.imageList(),
+			Web:          web,
 			// 画像を外して呼び直すときは、プロンプトも送っていない扱いに作り直す。
-			PromptWithoutImages: replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr.withoutImages()),
-			MaxChars:            s.Reply.MaxChars,
-			MaxTokens:           s.Reply.MaxTokens,
-			PostLimit:           maxNote - utf8.RuneCountInString(prefix),
-			Recipient:           &note.User,
+			PromptWithoutImages: memoryPrompt(mem, note.User, s.location(), false) +
+				replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr.withoutImages()),
+			MaxChars:  s.Reply.MaxChars,
+			MaxTokens: s.Reply.MaxTokens,
+			PostLimit: maxNote - utf8.RuneCountInString(prefix),
+			Recipient: &note.User,
 		})
 		if errors.Is(err, errSilent) {
 			return "silent", nil
@@ -237,7 +247,7 @@ UPDATE handled_notifications SET reply_text = $2, reply_visibility = $3, reply_l
 		// 始まるものだけを読む)。見た目を崩さないよう、宛先の後で改行する。
 		prefix = strings.TrimRight(prefix, " ") + "\n"
 	}
-	outcome, err := b.postReply(ctx, as, note, scope, prefix+text, "replied")
+	outcome, replyID, err := b.postReply(ctx, as, note, scope, prefix+text, "replied")
 	if err != nil {
 		return "", err
 	}
@@ -248,6 +258,13 @@ UPDATE handled_notifications SET reply_text = $2, reply_visibility = $3, reply_l
 INSERT INTO bot_replies (notification_id, root_id, user_id, at) VALUES ($1, $2, $3, $4)
 ON CONFLICT (notification_id) DO NOTHING`, ev.ID, th.rootID, note.User.ID, now()); err != nil {
 			b.log.Error("claude-bot: 返事の記録を保存できません", "err", err)
+		}
+		if s.Memory.enabledFor(note.User) && rememberable(scope) {
+			if err := remember(ctx, db, note.User, exchange{
+				NoteID: note.ID, ReplyID: replyID, User: memoryNoteText(note), Bot: text, At: now(),
+			}, s.Memory.KeepRecent); err != nil {
+				b.logEvent(ctx, "error", eventMemory, "やり取りを覚えられませんでした: "+err.Error(), note.User.ID, note.ID)
+			}
 		}
 	}
 	// 両方を選んだときのリアクションは、返事を投稿できたときだけ付ける。
@@ -289,8 +306,9 @@ func narrower(a, b replyScope) replyScope {
 	return out
 }
 
-// postReply posts text as a reply to note.
-func (b *bot) postReply(ctx context.Context, as plugin.Caller, note noteView, scope replyScope, text, outcome string) (string, error) {
+// postReply posts text as a reply to note. It also returns the ID of the
+// created note ("" when it could not be read).
+func (b *bot) postReply(ctx context.Context, as plugin.Caller, note noteView, scope replyScope, text, outcome string) (string, string, error) {
 	params := map[string]any{
 		"text":       text,
 		"replyId":    note.ID,
@@ -299,14 +317,50 @@ func (b *bot) postReply(ctx context.Context, as plugin.Caller, note noteView, sc
 	if scope.LocalOnly {
 		params["localOnly"] = true
 	}
-	if _, err := as.Call(ctx, "notes/create", params); err != nil {
+	raw, err := as.Call(ctx, "notes/create", params)
+	if err != nil {
 		if isClientError(err) {
 			b.logEvent(ctx, "error", eventPostError, "返事を投稿できませんでした: "+err.Error(), note.User.ID, note.ID)
-			return "post_rejected", nil
+			return "post_rejected", "", nil
 		}
-		return "", fmt.Errorf("notes/create: %w", err)
+		return "", "", fmt.Errorf("notes/create: %w", err)
 	}
-	return outcome, nil
+	// 投稿は済んでいるので、IDを読めなくてもエラーにしない (再試行させると
+	// 二重に投稿する)。IDは、覚えたやり取りの中で返事を指すために残すだけ。
+	var created struct {
+		CreatedNote struct {
+			ID string `json:"id"`
+		} `json:"createdNote"`
+	}
+	_ = json.Unmarshal(raw, &created)
+	return outcome, created.CreatedNote.ID, nil
+}
+
+// recallFor returns what the bot remembers of the note's author, leaving out
+// the exchanges the thread already sends.
+//
+// sentはプロンプトに入れる祖先 (promptThreadの結果)。そこか返事をする投稿に
+// 相手の投稿があるやり取りは、スレッドの側で送るので記憶から除く。botの返事に
+// 返信して話を続けたときに、同じやり取りを二重に送らないため。窓の外の祖先は
+// 送らないので、除かずに記憶として渡す。
+//
+// 記憶の行を読めない (壊れている) ときは、記録に残して記憶なしで返事をする。
+// 再試行しても直らず、その人への返事が止まり続けるため。DBのエラーは
+// 再試行に任せる。
+func (b *bot) recallFor(ctx context.Context, m MemorySettings, note noteView, sent []noteView) ([]exchange, error) {
+	if !m.enabledFor(note.User) {
+		return nil, nil
+	}
+	skip := map[string]bool{note.ID: true}
+	for _, n := range sent {
+		skip[n.ID] = true
+	}
+	mem, err := recall(ctx, b.db(), note.User.ID, skip, m.KeepRecent)
+	if errors.Is(err, errMemoryDecode) {
+		b.logEvent(ctx, "error", eventMemory, "覚えた会話を読めないため、使わずに返事をします: "+err.Error(), note.User.ID, note.ID)
+		return nil, nil
+	}
+	return mem, err
 }
 
 // overLimit handles a mention that arrives over a cost limit.
@@ -329,8 +383,10 @@ SELECT EXISTS (SELECT 1 FROM events WHERE kind = $1 AND user_id = $2 AND at > $3
 		return "limited", nil
 	}
 	b.logEvent(ctx, "warn", eventRefused, "費用の上限のため、決まった文で断りました: "+reason, note.User.ID, note.ID)
-	// 断りの文は文脈を含まないので、元の投稿だけに合わせる。
-	return b.postReply(ctx, as, note, replyScopeFor(s.Reply.Visibility, note, nil), prefix+s.Limits.OverLimitMessage, "refused")
+	// 断りの文は文脈を含まないので、元の投稿だけに合わせる。断りの文は
+	// 会話ではないので、記憶にも残さない。
+	outcome, _, err := b.postReply(ctx, as, note, replyScopeFor(s.Reply.Visibility, note, nil), prefix+s.Limits.OverLimitMessage, "refused")
+	return outcome, err
 }
 
 // audienceAllows applies "who can talk to the bot".

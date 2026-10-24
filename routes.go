@@ -22,6 +22,9 @@ import (
  * 記録 (events) は管理者だけが読める。話しかけた人の ID と投稿の ID、
  * Claude API が返したエラーの本文 (入力の一部を含みうる) が入るため。
  * モデレーターに見せるのは設定と使った量だけにする。
+ *
+ * 覚えている会話 (memories) も管理者だけが読める。話しかけた人の投稿と
+ * botの返事の本文がそのまま入るため (#17)。
  */
 
 func routes(pctx plugin.Context, r plugin.Router) error {
@@ -32,6 +35,9 @@ func routes(pctx plugin.Context, r plugin.Router) error {
 	r.POST("/admin/account/create", b.requireAdmin(b.routeCreateAccount))
 	r.POST("/admin/account/update", b.requireAdmin(b.routeUpdateAccount))
 	r.POST("/admin/account/delete", b.requireAdmin(b.routeDeleteAccount))
+	r.POST("/admin/memories", b.requireAdminToRead(b.routeMemories))
+	r.POST("/admin/memories/show", b.requireAdminToRead(b.routeShowMemory))
+	r.POST("/admin/memories/delete", b.requireAdmin(b.routeDeleteMemories))
 	return nil
 }
 
@@ -370,5 +376,85 @@ func (b *bot) routeDeleteAccount(req plugin.Request) (any, error) {
 	if err := b.pctx.Accounts().Delete(ctx, acc.ID); err != nil {
 		return nil, err
 	}
+	// 覚えた会話は、消したbotの返事を含む。作り直したbotが前のbotの返事を
+	// 「あなた」の発言として引き継がないよう、一緒に消す (#17)。アカウントは
+	// 消えているので、失敗しても記録に残すだけにする。
+	if _, err := b.db().ExecContext(ctx, `DELETE FROM memories`); err != nil {
+		b.logEvent(ctx, "error", eventMemory, "botのアカウントを消した後、覚えた会話を消せませんでした: "+err.Error(), "", "")
+	}
 	return b.state(req)
+}
+
+// maxMemoriesShown is how many people the admin page lists.
+const maxMemoriesShown = 100
+
+// memoriesResponse is the admin page's list of remembered people.
+type memoriesResponse struct {
+	Memories []memorySummary `json:"memories"`
+	// Total counts everyone remembered, including those not listed.
+	Total int `json:"total"`
+}
+
+func (b *bot) memories(req plugin.Request) (*memoriesResponse, error) {
+	list, total, err := listMemories(req.Context(), b.db(), maxMemoriesShown)
+	if err != nil {
+		return nil, err
+	}
+	return &memoriesResponse{Memories: list, Total: total}, nil
+}
+
+func (b *bot) routeMemories(req plugin.Request) (any, error) {
+	return b.memories(req)
+}
+
+// memoryResponse is what the bot remembers of one person.
+type memoryResponse struct {
+	UserID    string     `json:"userId"`
+	Exchanges []exchange `json:"exchanges"`
+}
+
+func (b *bot) routeShowMemory(req plugin.Request) (any, error) {
+	var body struct {
+		UserID string `json:"userId"`
+	}
+	if err := req.Bind(&body); err != nil || body.UserID == "" {
+		return nil, badRequest("相手 (userId) を指定してください")
+	}
+	mem, err := recall(req.Context(), b.db(), body.UserID, nil, maxMemoryKeepRecent)
+	if errors.Is(err, errMemoryDecode) {
+		return nil, badRequest("この人の記憶を読めません。消してください")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if mem == nil {
+		mem = []exchange{}
+	}
+	return &memoryResponse{UserID: body.UserID, Exchanges: mem}, nil
+}
+
+func (b *bot) routeDeleteMemories(req plugin.Request) (any, error) {
+	ctx := req.Context()
+	var body struct {
+		UserID string `json:"userId"`
+		// All must be true to forget everyone. userIdの入れ忘れで全部を
+		// 消さないよう、別の項目にしている。
+		All bool `json:"all"`
+	}
+	if err := req.Bind(&body); err != nil {
+		return nil, badRequest("入力を読めません")
+	}
+	switch {
+	case body.All && body.UserID == "":
+		if _, err := b.db().ExecContext(ctx, `DELETE FROM memories`); err != nil {
+			return nil, fmt.Errorf("forget all: %w", err)
+		}
+	case !body.All && body.UserID != "":
+		if _, err := b.db().ExecContext(ctx, `DELETE FROM memories WHERE user_id = $1`, body.UserID); err != nil {
+			return nil, fmt.Errorf("forget: %w", err)
+		}
+	default:
+		return nil, badRequest("消す相手 (userId) か、全部 (all) のどちらか一方を指定してください")
+	}
+	return b.memories(req)
 }
