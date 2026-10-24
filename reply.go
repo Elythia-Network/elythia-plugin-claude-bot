@@ -200,7 +200,7 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 			return "", err
 		}
 		threadPrompt := replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr)
-		prompt := memoryPrompt(mem, note.User, s.location(), len(vr.imageList()) > 0) + threadPrompt
+		prompt := memoryPrompt(mem.Exchanges, mem.About, note.User, s.location(), len(vr.imageList()) > 0) + threadPrompt
 		// webも、Claudeを呼ぶときにだけ使えるかを決めて回数を取り置く (#11)。
 		// URLがあるかは今のスレッドだけで見る。記憶には前の返事の出典のURLが
 		// 残るので、記憶まで見ると、URLの無い質問でも取得に多く配ってしまう。
@@ -220,7 +220,7 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 			Images:       vr.imageList(),
 			Web:          web,
 			// 画像を外して呼び直すときは、プロンプトも送っていない扱いに作り直す。
-			PromptWithoutImages: memoryPrompt(mem, note.User, s.location(), false) +
+			PromptWithoutImages: memoryPrompt(mem.Exchanges, mem.About, note.User, s.location(), false) +
 				replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr.withoutImages()),
 			MaxChars:  s.Reply.MaxChars,
 			MaxTokens: s.Reply.MaxTokens,
@@ -260,10 +260,13 @@ ON CONFLICT (notification_id) DO NOTHING`, ev.ID, th.rootID, note.User.ID, now()
 			b.log.Error("claude-bot: 返事の記録を保存できません", "err", err)
 		}
 		if s.Memory.enabledFor(note.User) && rememberable(scope) {
-			if err := remember(ctx, db, note.User, exchange{
+			n, err := remember(ctx, db, note.User, exchange{
 				NoteID: note.ID, ReplyID: replyID, User: memoryNoteText(note), Bot: text, At: now(),
-			}, s.Memory.KeepRecent); err != nil {
+			}, s.Memory.backlog())
+			if err != nil {
 				b.logEvent(ctx, "error", eventMemory, "やり取りを覚えられませんでした: "+err.Error(), note.User.ID, note.ID)
+			} else {
+				b.maybeSummarize(ctx, s.Memory, note.User, n, note.ID)
 			}
 		}
 	}
@@ -347,18 +350,18 @@ func (b *bot) postReply(ctx context.Context, as plugin.Caller, note noteView, sc
 // 記憶の行を読めない (壊れている) ときは、記録に残して記憶なしで返事をする。
 // 再試行しても直らず、その人への返事が止まり続けるため。DBのエラーは
 // 再試行に任せる。
-func (b *bot) recallFor(ctx context.Context, m MemorySettings, note noteView, sent []noteView) ([]exchange, error) {
+func (b *bot) recallFor(ctx context.Context, m MemorySettings, note noteView, sent []noteView) (memoryView, error) {
 	if !m.enabledFor(note.User) {
-		return nil, nil
+		return memoryView{}, nil
 	}
 	skip := map[string]bool{note.ID: true}
 	for _, n := range sent {
 		skip[n.ID] = true
 	}
-	mem, err := recall(ctx, b.db(), note.User.ID, skip, m.KeepRecent)
+	mem, err := recallMemory(ctx, b.db(), note.User.ID, skip, m.KeepRecent)
 	if errors.Is(err, errMemoryDecode) {
 		b.logEvent(ctx, "error", eventMemory, "覚えた会話を読めないため、使わずに返事をします: "+err.Error(), note.User.ID, note.ID)
-		return nil, nil
+		return memoryView{}, nil
 	}
 	return mem, err
 }

@@ -147,4 +147,13 @@ CREATE TABLE memories (
 );
 CREATE INDEX memories_updated_at ON memories (updated_at);
 `},
+	{Version: 4, SQL: `
+-- 相手ごとの要約 (#18)。summary は決まった欄のjsonb。summarizing_since は要約の
+-- jobが取った印で、同じ人の要約を同時に2つ作らないために使う。jobが途中で
+-- 落ちて残った印は、古くなったら取り直せる (summaryLease)。
+ALTER TABLE memories
+	ADD COLUMN summary           jsonb,
+	ADD COLUMN summarized_at     timestamptz,
+	ADD COLUMN summarizing_since timestamptz;
+`},
 }

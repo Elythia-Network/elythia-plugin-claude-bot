@@ -232,7 +232,11 @@ SPDX-License-Identifier: AGPL-3.0-only
 				</MkSelect>
 				<MkInput v-model="draft.memory.keepRecent" type="number" :min="1" :max="20">
 					<template #label>覚えておくやり取りの数</template>
-					<template #caption>1〜20。新しい方から、この数だけを残して返事に渡します。1件は相手の投稿とbotの返事をそれぞれ1000文字までにして残すので、数を増やすほど返事の入力のtokenが増えます。</template>
+					<template #caption>1〜20。新しい方から、この数だけを返事に渡します。1件は相手の投稿とbotの返事をそれぞれ1000文字までにして残すので、数を増やすほど返事の入力のtokenが増えます。</template>
+				</MkInput>
+				<MkInput v-model="draft.memory.summarizeAt" type="number" :min="0" :max="50">
+					<template #label>要約するまでのやり取りの数 (0で要約しない)</template>
+					<template #caption>覚えておく数に10を足した数以上、30を足した数以下(今の覚えておく数なら{{ finite(draft.memory.keepRecent) + 10 }}〜{{ finite(draft.memory.keepRecent) + 30 }})。この数だけたまったら、古い方のやり取りをClaudeに要約させて「この人について」の覚え書きにし、直近の分だけを残します。要約するたびにClaude APIを1回呼びます(予算と1か月のtokenの量に数え、回数の上限には数えません)。要約しないときは、覚えておく数だけを残します。</template>
 				</MkInput>
 			</div>
 		</MkFolder>
@@ -403,16 +407,24 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<div v-if="memoriesTotal > memories.length" :class="$style.note">新しい方から{{ memories.length }}人を出しています。</div>
 					<MkFolder v-for="m in memories" :key="m.userId" :defaultOpen="false" @opened="openMemory(m.userId)" @closed="openMemories.delete(m.userId)">
 						<template #label>{{ m.acct }}</template>
-						<template #suffix>{{ m.count }} 件</template>
+						<template #suffix>{{ m.count }} 件<template v-if="m.hasSummary">・要約あり</template></template>
 						<div class="_gaps_s">
 							<div v-if="memoryErrors[m.userId]" :class="$style.error">{{ memoryErrors[m.userId] }}</div>
 							<MkLoading v-else-if="!memoryDetails[m.userId]"/>
-							<div v-for="(ex, i) in memoryDetails[m.userId] ?? []" :key="i" :class="$style.message">
+							<div v-for="a in aboutOf(m.userId)" :key="'about'" :class="$style.message">
+								<div :class="$style.label">この人について<template v-if="a.summarizedAt"> ({{ new Date(a.summarizedAt).toLocaleString() }}に要約)</template></div>
+								<div v-if="a.about.callName" :class="$style.pre">呼び名: {{ a.about.callName }}</div>
+								<div v-if="a.about.likes.length > 0" :class="$style.pre">好きなもの・関心: {{ a.about.likes.join('、') }}</div>
+								<div v-if="a.about.topics.length > 0" :class="$style.pre">これまでに話した話題: {{ a.about.topics.join('、') }}</div>
+								<div v-if="a.about.notes" :class="$style.pre">メモ: {{ a.about.notes }}</div>
+							</div>
+							<div v-for="(ex, i) in memoryDetails[m.userId]?.exchanges ?? []" :key="i" :class="$style.message">
 								<div :class="$style.note">{{ new Date(ex.at).toLocaleString() }} (投稿 {{ ex.noteId }}<template v-if="ex.replyId">、返事 {{ ex.replyId }}</template>)</div>
 								<div :class="$style.pre">相手: {{ ex.user }}</div>
 								<div :class="$style.pre">bot: {{ ex.bot }}</div>
 							</div>
 							<div class="_buttons">
+								<MkButton v-if="m.hasSummary" inline danger :disabled="busy" @click="forgetSummary(m.userId)">要約だけを消す</MkButton>
 								<MkButton inline danger :disabled="busy" @click="forgetMemory(m.userId)">この人の記憶を消す</MkButton>
 							</div>
 						</div>
@@ -460,7 +472,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, fitAvatar, maxFetchesPerReply, readAsBase64, splitList, totalTokens, usd, webFetchTokensEstimate } from './api.js';
-import type { BotEvent, EventsResponse, MemoriesResponse, MemoryExchange, MemoryResponse, MemorySummary, PeriodUsage, Settings, State } from './api.js';
+import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryResponse, MemorySummary, PeriodUsage, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
 const events = ref<BotEvent[]>([]);
@@ -470,7 +482,7 @@ const memoriesTotal = ref(0);
 const memoriesError = ref('');
 const confirmForgetAll = ref(false);
 // 開いた人のやり取りの本文。一覧には件数しか来ないので、開いたときに読む。
-const memoryDetails = ref<Record<string, MemoryExchange[]>>({});
+const memoryDetails = ref<Record<string, MemoryResponse>>({});
 const memoryErrors = ref<Record<string, string>>({});
 // 開いている人。一覧を読み直したときに、開いている人の本文だけを読み直す。
 const openMemories = new Set<string>();
@@ -604,6 +616,13 @@ function applyMemories(res: MemoriesResponse) {
 	}
 }
 
+// 要約は1人に1つだけ。テンプレートで null を確かめた値を名前で受けるため、0件か
+// 1件の配列にして v-for で回す。
+function aboutOf(userId: string): { about: MemoryAbout; summarizedAt: string | null }[] {
+	const d = memoryDetails.value[userId];
+	return d?.about ? [{ about: d.about, summarizedAt: d.summarizedAt }] : [];
+}
+
 function listed(userId: string): boolean {
 	return memories.value.some(m => m.userId === userId);
 }
@@ -618,7 +637,7 @@ async function loadMemory(userId: string) {
 		const res = await api<MemoryResponse>('admin/memories/show', { userId });
 		// 読んでいる間に消した人の本文は、遅れて届いても書き戻さない。
 		if (!listed(userId)) return;
-		memoryDetails.value = { ...memoryDetails.value, [userId]: res.exchanges };
+		memoryDetails.value = { ...memoryDetails.value, [userId]: res };
 		const errors = { ...memoryErrors.value };
 		delete errors[userId];
 		memoryErrors.value = errors;
@@ -652,6 +671,10 @@ async function deleteMemories(params: Record<string, unknown>) {
 
 function forgetMemory(userId: string) {
 	return deleteMemories({ userId });
+}
+
+function forgetSummary(userId: string) {
+	return deleteMemories({ userId, summaryOnly: true });
 }
 
 async function forgetAllMemories() {
@@ -729,6 +752,12 @@ function saveSettings() {
 	r.maxRoundTrips = finite(r.maxRoundTrips);
 	v.maxImages = finite(v.maxImages);
 	d.memory.keepRecent = finite(d.memory.keepRecent);
+	// 0は「要約しない」の意味で保存が通るので、空欄を0に寄せると黙って要約が
+	// 止まる。空欄のときは今の値のままにする。
+	const summarizeAt = d.memory.summarizeAt as unknown;
+	d.memory.summarizeAt = summarizeAt === '' || summarizeAt == null || Number.isNaN(summarizeAt)
+		? state.value?.settings.memory.summarizeAt ?? 0
+		: finite(summarizeAt);
 	w.perUserPerHour = finite(w.perUserPerHour);
 	w.globalPerHour = finite(w.globalPerHour);
 	w.maxUsesPerReply = finite(w.maxUsesPerReply);

@@ -212,6 +212,13 @@ func summarize(ctx context.Context, db *sql.DB, s Settings) (usageSummary, error
 	return usageSummary{Today: today, Month: mon, Budget: computeBudget(s.Budget, mon)}, nil
 }
 
+// kindMemory is the usage_log kind of the summarizing calls (#18).
+//
+// 回数の上限 (1人・サーバー・全体) には数えない。相手が話しかけた回数ではなく、
+// 返事 (回数に数える) で記録が summarizeAt − keepRecent 件 (minSummaryGap 以上)
+// 増えるたびに1回しか呼ばないため。tokenの量と予算には数える。
+const kindMemory = "memory"
+
 // checkLimits explains why a call is not allowed, or "" when it is.
 //
 // userID が空なら (定時の投稿) 1 人あたりの上限は見ない。host が空なら
@@ -225,7 +232,7 @@ func checkLimits(ctx context.Context, db *sql.DB, s Settings, userID, host strin
 	if userID != "" && l.PerUserPerHour > 0 {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM usage_log WHERE user_id = $1 AND at > $2`, userID, t.Add(-time.Hour)).Scan(&n); err != nil {
+			`SELECT count(*) FROM usage_log WHERE user_id = $1 AND at > $2 AND kind <> $3`, userID, t.Add(-time.Hour), kindMemory).Scan(&n); err != nil {
 			return "", fmt.Errorf("limit per user: %w", err)
 		}
 		if n >= l.PerUserPerHour {
@@ -235,7 +242,7 @@ func checkLimits(ctx context.Context, db *sql.DB, s Settings, userID, host strin
 	if host != "" && l.PerHostPerDay > 0 {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM usage_log WHERE host = $1 AND at >= $2`, host, day).Scan(&n); err != nil {
+			`SELECT count(*) FROM usage_log WHERE host = $1 AND at >= $2 AND kind <> $3`, host, day, kindMemory).Scan(&n); err != nil {
 			return "", fmt.Errorf("limit per host: %w", err)
 		}
 		if n >= l.PerHostPerDay {
@@ -245,7 +252,7 @@ func checkLimits(ctx context.Context, db *sql.DB, s Settings, userID, host strin
 	if l.GlobalPerDay > 0 {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM usage_log WHERE at >= $1`, day).Scan(&n); err != nil {
+			`SELECT count(*) FROM usage_log WHERE at >= $1 AND kind <> $2`, day, kindMemory).Scan(&n); err != nil {
 			return "", fmt.Errorf("limit per day: %w", err)
 		}
 		if n >= l.GlobalPerDay {
