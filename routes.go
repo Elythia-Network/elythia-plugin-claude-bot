@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/elythia-network/elythia/plugin"
@@ -411,6 +412,9 @@ func (b *bot) routeMemories(req plugin.Request) (any, error) {
 type memoryResponse struct {
 	UserID    string     `json:"userId"`
 	Exchanges []exchange `json:"exchanges"`
+	// About is the summary (#18). 無ければ null。
+	About        *about     `json:"about"`
+	SummarizedAt *time.Time `json:"summarizedAt"`
 }
 
 func (b *bot) routeShowMemory(req plugin.Request) (any, error) {
@@ -420,17 +424,18 @@ func (b *bot) routeShowMemory(req plugin.Request) (any, error) {
 	if err := req.Bind(&body); err != nil || body.UserID == "" {
 		return nil, badRequest("相手 (userId) を指定してください")
 	}
-	mem, err := recall(req.Context(), b.db(), body.UserID, nil, maxMemoryKeepRecent)
+	// 記録は要約するまで summarizeAt の2倍までたまるので、上限の数まで全部を見せる。
+	mem, err := recallMemory(req.Context(), b.db(), body.UserID, nil, maxMemorySummarizeAt*2)
 	if errors.Is(err, errMemoryDecode) {
 		return nil, badRequest("この人の記憶を読めません。消してください")
 	}
 	if err != nil {
 		return nil, err
 	}
-	if mem == nil {
-		mem = []exchange{}
+	if mem.Exchanges == nil {
+		mem.Exchanges = []exchange{}
 	}
-	return &memoryResponse{UserID: body.UserID, Exchanges: mem}, nil
+	return &memoryResponse{UserID: body.UserID, Exchanges: mem.Exchanges, About: mem.About, SummarizedAt: mem.SummarizedAt}, nil
 }
 
 func (b *bot) routeDeleteMemories(req plugin.Request) (any, error) {
@@ -440,11 +445,21 @@ func (b *bot) routeDeleteMemories(req plugin.Request) (any, error) {
 		// All must be true to forget everyone. userIdの入れ忘れで全部を
 		// 消さないよう、別の項目にしている。
 		All bool `json:"all"`
+		// SummaryOnly forgets only the summary of userId (#18). やり取りは残す。
+		SummaryOnly bool `json:"summaryOnly"`
 	}
 	if err := req.Bind(&body); err != nil {
 		return nil, badRequest("入力を読めません")
 	}
 	switch {
+	case body.SummaryOnly && !body.All && body.UserID != "":
+		// 要約しているjobの印も外す。外さないと、jobが消した要約を材料にした
+		// 新しい要約を書き戻す。
+		if _, err := b.db().ExecContext(ctx, `UPDATE memories SET summary = NULL, summarized_at = NULL, summarizing_since = NULL WHERE user_id = $1`, body.UserID); err != nil {
+			return nil, fmt.Errorf("forget summary: %w", err)
+		}
+	case body.SummaryOnly:
+		return nil, badRequest("要約だけを消すときは、相手 (userId) を1人指定してください")
 	case body.All && body.UserID == "":
 		if _, err := b.db().ExecContext(ctx, `DELETE FROM memories`); err != nil {
 			return nil, fmt.Errorf("forget all: %w", err)

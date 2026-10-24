@@ -131,6 +131,20 @@ type MemorySettings struct {
 	Audience string `json:"audience"`
 	// KeepRecent is how many recent exchanges are kept and sent.
 	KeepRecent int `json:"keepRecent"`
+	// SummarizeAt is how many exchanges are kept before they are summarized
+	// (#18). 0 means never summarize.
+	SummarizeAt int `json:"summarizeAt"`
+}
+
+// backlog is how many exchanges a person's memory holds at most.
+//
+// 要約するときは、要約が失敗し続けても膨らみ続けないよう summarizeAt の2倍で
+// 切る。要約しないときは、返事に渡す数だけを残す。
+func (m MemorySettings) backlog() int {
+	if m.SummarizeAt > 0 {
+		return m.SummarizeAt * 2
+	}
+	return m.KeepRecent
 }
 
 // enabledFor reports whether the exchanges with u are remembered and used.
@@ -230,8 +244,9 @@ func defaultSettings() Settings {
 			MaxContentTokens: 10000,
 		},
 		Memory: MemorySettings{
-			Audience:   "local",
-			KeepRecent: 5,
+			Audience:    "local",
+			KeepRecent:  5,
+			SummarizeAt: 20,
 		},
 		PriceOverrides: []PriceOverride{},
 	}
@@ -249,6 +264,17 @@ func loadSettings(ctx context.Context, db *sql.DB) (Settings, error) {
 	}
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return defaultSettings(), fmt.Errorf("decode settings: %w", err)
+	}
+	// 要約 (#18) より前に保存した設定には summarizeAt が無い。覚えておく数を
+	// 大きくしてあると、既定値では検証を通らず、どの設定も保存できなくなる
+	// ので、その数に合わせた値にする。
+	var probe struct {
+		Memory struct {
+			SummarizeAt *int `json:"summarizeAt"`
+		} `json:"memory"`
+	}
+	if json.Unmarshal(raw, &probe) == nil && probe.Memory.SummarizeAt == nil {
+		s.Memory.SummarizeAt = max(defaultSettings().Memory.SummarizeAt, s.Memory.KeepRecent+minSummaryGap)
 	}
 	return s, nil
 }
@@ -306,6 +332,14 @@ const (
 	// maxMemoryKeepRecent は覚えておくやり取りの数の上限。1件は最大で
 	// maxMemoryChars × 2 文字なので、返事の入力が膨らみすぎない数にする。
 	maxMemoryKeepRecent = 20
+	// maxMemorySummarizeAt は要約するまでのやり取りの数の上限。記録は最大で
+	// この2倍になる。要約するまでの数は、覚えておく数に maxSummaryBatch を
+	// 足した数までにする (下の検証) ので、それより大きくはならない。
+	maxMemorySummarizeAt = maxMemoryKeepRecent + maxSummaryBatch
+	// minSummaryGap は、要約するまでの数と覚えておく数の差の下限。要約は
+	// 記録がこの差の分だけ増えるたびに呼ぶ。差が小さいと、返事のたびに要約を
+	// 呼ぶことになる (要約の呼び出しは回数の上限に数えない)。
+	minSummaryGap = 10
 )
 
 func oneOf(v string, allowed ...string) bool {
@@ -477,6 +511,11 @@ func (s Settings) check(maxNoteLength int) error {
 	}
 	if s.Memory.KeepRecent < 1 || s.Memory.KeepRecent > maxMemoryKeepRecent {
 		return badRequest("覚えておくやり取りの数は1〜%dにしてください", maxMemoryKeepRecent)
+	}
+	// 差を maxSummaryBatch までにするのは、1回の要約で入れられる数を超えると、
+	// 要約の後も記録が覚えておく数まで減らず、相手の発言が説明より長く残るため。
+	if n := s.Memory.SummarizeAt; n != 0 && (n < s.Memory.KeepRecent+minSummaryGap || n > s.Memory.KeepRecent+maxSummaryBatch) {
+		return badRequest("要約するまでのやり取りの数は、覚えておく数 (%d) に%dを足した数以上、%dを足した数以下にしてください (0で要約しない)", s.Memory.KeepRecent, minSummaryGap, maxSummaryBatch)
 	}
 
 	if len(s.PriceOverrides) > 100 {

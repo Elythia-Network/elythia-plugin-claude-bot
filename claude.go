@@ -194,6 +194,41 @@ func defangPlain(sb *strings.Builder, text string, from, to int) {
 	}
 }
 
+// claudeClient builds the Claude API client with the stored API key. キーが
+// 無い・読めないときは記録に残して errSilent を返す。
+func (b *bot) claudeClient(ctx context.Context, userID, noteID string) (anthropic.Client, error) {
+	key, err := b.pctx.Secrets().Get(ctx, secretAPIKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, plugin.ErrSecretNotSet):
+			b.logEvent(ctx, "warn", eventConfig, "APIキーが未設定のため、投稿しませんでした。管理画面から入れてください。", userID, noteID)
+		case errors.Is(err, plugin.ErrSecretsUnavailable):
+			b.logEvent(ctx, "warn", eventConfig, "設定ファイルに pluginSecretKey が無いため、APIキーを読めません。", userID, noteID)
+		case errors.Is(err, plugin.ErrSecretUnreadable):
+			b.logEvent(ctx, "warn", eventConfig, "APIキーを今の鍵で読めません。管理画面から入れ直してください。", userID, noteID)
+		default:
+			return anthropic.Client{}, fmt.Errorf("read api key: %w", err)
+		}
+		return anthropic.Client{}, errSilent
+	}
+
+	client := anthropic.NewClient(
+		// SDK は既定で ANTHROPIC_API_KEY などの環境変数や ~/.config の
+		// プロファイルを読む。サーバーの環境に別の認証情報があっても、
+		// 管理画面で入れたキーだけを使う。
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey(key),
+		// 運営者の proxy と SSRF ガードを通すため、本体の client を使う。
+		option.WithHTTPClient(b.pctx.HTTP()),
+		option.WithRequestTimeout(requestTimeout),
+		// SDK の自動再試行は使わない。1 回 30 秒の timeout が再試行の数だけ
+		// 重なり、さらに通知の再試行 (最大 5 回) と掛け合わさるため。やり直す
+		// かどうかは、ここで分類して決める。
+		option.WithMaxRetries(0),
+	)
+	return client, nil
+}
+
 // generate asks Claude for text and returns it, or errSilent.
 //
 // 投稿しない (沈黙する) のは次のとき。どれも管理画面の記録に残す。
@@ -217,35 +252,10 @@ func defangPlain(sb *strings.Builder, text string, from, to int) {
 //
 // 呼び直した分も費用の上限に数え、呼び直す前に上限を確かめる。
 func (b *bot) generate(ctx context.Context, s Settings, g generation) (string, error) {
-	key, err := b.pctx.Secrets().Get(ctx, secretAPIKey)
+	client, err := b.claudeClient(ctx, g.UserID, g.NoteID)
 	if err != nil {
-		switch {
-		case errors.Is(err, plugin.ErrSecretNotSet):
-			b.logEvent(ctx, "warn", eventConfig, "APIキーが未設定のため、投稿しませんでした。管理画面から入れてください。", g.UserID, g.NoteID)
-		case errors.Is(err, plugin.ErrSecretsUnavailable):
-			b.logEvent(ctx, "warn", eventConfig, "設定ファイルに pluginSecretKey が無いため、APIキーを読めません。", g.UserID, g.NoteID)
-		case errors.Is(err, plugin.ErrSecretUnreadable):
-			b.logEvent(ctx, "warn", eventConfig, "APIキーを今の鍵で読めません。管理画面から入れ直してください。", g.UserID, g.NoteID)
-		default:
-			return "", fmt.Errorf("read api key: %w", err)
-		}
-		return "", errSilent
+		return "", err
 	}
-
-	client := anthropic.NewClient(
-		// SDK は既定で ANTHROPIC_API_KEY などの環境変数や ~/.config の
-		// プロファイルを読む。サーバーの環境に別の認証情報があっても、
-		// 管理画面で入れたキーだけを使う。
-		option.WithoutEnvironmentDefaults(),
-		option.WithAPIKey(key),
-		// 運営者の proxy と SSRF ガードを通すため、本体の client を使う。
-		option.WithHTTPClient(b.pctx.HTTP()),
-		option.WithRequestTimeout(requestTimeout),
-		// SDK の自動再試行は使わない。1 回 30 秒の timeout が再試行の数だけ
-		// 重なり、さらに通知の再試行 (最大 5 回) と掛け合わさるため。やり直す
-		// かどうかは、ここで分類して決める。
-		option.WithMaxRetries(0),
-	)
 
 	images, prompt := g.Images, g.Prompt
 	shortened, imagesDropped := false, false

@@ -26,6 +26,17 @@ func jobs(pctx plugin.Context, j plugin.Jobs) error {
 	j.Handle(jobTick, func(ctx context.Context, _ json.RawMessage) error {
 		return b.tick(ctx)
 	})
+	j.Handle(jobSummarize, func(ctx context.Context, raw json.RawMessage) error {
+		var p summarizeJob
+		// 形の違うjobは繰り返しても直らない。
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return plugin.NoRetry(fmt.Errorf("decode %s: %w", jobSummarize, err))
+		}
+		if p.UserID == "" {
+			return plugin.NoRetry(fmt.Errorf("%s: userId is empty", jobSummarize))
+		}
+		return b.summarizeMemory(ctx, p.UserID)
+	})
 	// 予定は管理画面で変わるので、cron には固定の 1 分ごとの tick だけを
 	// 登録し、投稿するかどうかは tick の中で設定を見て決める。予定ごとに
 	// Schedule を呼ぶと、変えたときに起動し直すまで反映されない。

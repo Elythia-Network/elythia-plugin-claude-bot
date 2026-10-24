@@ -81,6 +81,7 @@ export type Settings = {
 		enabled: boolean;
 		audience: string;
 		keepRecent: number;
+		summarizeAt: number;
 	};
 	priceOverrides: PriceOverride[];
 };
@@ -140,6 +141,15 @@ export type MemorySummary = {
 	acct: string;
 	updatedAt: string;
 	count: number;
+	hasSummary: boolean;
+};
+
+/** What the bot remembers of a person, written by the summarizer. */
+export type MemoryAbout = {
+	callName: string;
+	likes: string[];
+	topics: string[];
+	notes: string;
 };
 
 /** Response of admin/memories and admin/memories/delete (administrators only). */
@@ -152,6 +162,8 @@ export type MemoriesResponse = {
 export type MemoryResponse = {
 	userId: string;
 	exchanges: MemoryExchange[];
+	about: MemoryAbout | null;
+	summarizedAt: string | null;
 };
 
 export type PriceRow = Price & {
