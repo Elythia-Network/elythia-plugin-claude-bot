@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/elythia-network/elythia/plugin"
+
+	"github.com/elythia-network/elythia-plugin-claude-bot/reversi"
 )
 
 // Settings is everything the operator configures from the admin page.
@@ -37,6 +39,7 @@ type Settings struct {
 	Vision    VisionSettings    `json:"vision"`
 	Web       WebSettings       `json:"web"`
 	Memory    MemorySettings    `json:"memory"`
+	Reversi   ReversiSettings   `json:"reversi"`
 
 	// PriceOverrides replaces the built-in price of a model.
 	PriceOverrides []PriceOverride `json:"priceOverrides"`
@@ -134,6 +137,25 @@ type MemorySettings struct {
 	// SummarizeAt is how many exchanges are kept before they are summarized
 	// (#18). 0 means never summarize.
 	SummarizeAt int `json:"summarizeAt"`
+}
+
+// ReversiSettings controls playing reversi with the bot (#24).
+type ReversiSettings struct {
+	// Enabled accepts invitations. 既定はOFF。招待を受けると相手を待たせる
+	// ことになるので、運営者が選んでONにする。
+	Enabled bool `json:"enabled"`
+	// Audience is whose invitations are accepted: "local", "followers" or
+	// "everyone".
+	Audience string `json:"audience"`
+	// Level is the strength (reversi.MinLevel..reversi.MaxLevel).
+	Level int `json:"level"`
+	// MaxThinkMs caps the time for one move, in milliseconds.
+	MaxThinkMs int `json:"maxThinkMs"`
+	// MaxGames caps the games in progress at once.
+	MaxGames int `json:"maxGames"`
+	// ReadyTimeoutMinutes is how long the bot waits for the opponent to get
+	// ready before it gives up the game.
+	ReadyTimeoutMinutes int `json:"readyTimeoutMinutes"`
 }
 
 // backlog is how many exchanges a person's memory holds at most.
@@ -248,6 +270,13 @@ func defaultSettings() Settings {
 			KeepRecent:  5,
 			SummarizeAt: 20,
 		},
+		Reversi: ReversiSettings{
+			Audience:            "local",
+			Level:               reversi.DefaultLevel,
+			MaxThinkMs:          2000,
+			MaxGames:            3,
+			ReadyTimeoutMinutes: 10,
+		},
 		PriceOverrides: []PriceOverride{},
 	}
 }
@@ -340,6 +369,17 @@ const (
 	// 記録がこの差の分だけ増えるたびに呼ぶ。差が小さいと、返事のたびに要約を
 	// 呼ぶことになる (要約の呼び出しは回数の上限に数えない)。
 	minSummaryGap = 10
+	// minReversiThinkMs と maxReversiThinkMs は、1手の考える時間の上限に
+	// 入れられる値の範囲。探索はキューのworkerの中で動くので、長くすると
+	// 他のjobと通知を待たせる。
+	minReversiThinkMs = 100
+	maxReversiThinkMs = 10000
+	// maxReversiGames は同時に進める対局の数の上限の上限。
+	maxReversiGames = 10
+	// maxReversiReadyTimeout は準備を待つ時間の上限 (分)。動かない記録を閉じる
+	// 掃除 (reversiStale の24時間) より十分短くし、準備を外す job が先に動くように
+	// する。
+	maxReversiReadyTimeout = 720
 )
 
 func oneOf(v string, allowed ...string) bool {
@@ -518,6 +558,10 @@ func (s Settings) check(maxNoteLength int) error {
 		return badRequest("要約するまでのやり取りの数は、覚えておく数 (%d) に%dを足した数以上、%dを足した数以下にしてください (0で要約しない)", s.Memory.KeepRecent, minSummaryGap, maxSummaryBatch)
 	}
 
+	if err := s.Reversi.check(); err != nil {
+		return err
+	}
+
 	if len(s.PriceOverrides) > 100 {
 		return badRequest("単価の上書きは100件までです")
 	}
@@ -609,6 +653,26 @@ func (w *WebSettings) normalize() {
 		}
 	}
 	w.BlockedDomains = domains
+}
+
+// check validates the reversi settings.
+func (r ReversiSettings) check() error {
+	if !oneOf(r.Audience, "local", "followers", "everyone") {
+		return badRequest("リバーシの招待を受ける相手の範囲が不正です")
+	}
+	if r.Level < reversi.MinLevel || r.Level > reversi.MaxLevel {
+		return badRequest("リバーシの強さは%d〜%dにしてください", reversi.MinLevel, reversi.MaxLevel)
+	}
+	if r.MaxThinkMs < minReversiThinkMs || r.MaxThinkMs > maxReversiThinkMs {
+		return badRequest("1手の考える時間は%d〜%dミリ秒にしてください", minReversiThinkMs, maxReversiThinkMs)
+	}
+	if r.MaxGames < 1 || r.MaxGames > maxReversiGames {
+		return badRequest("同時に進める対局の数は1〜%dにしてください", maxReversiGames)
+	}
+	if r.ReadyTimeoutMinutes < 1 || r.ReadyTimeoutMinutes > maxReversiReadyTimeout {
+		return badRequest("相手の準備を待つ時間は1〜%d分にしてください", maxReversiReadyTimeout)
+	}
+	return nil
 }
 
 func validateText(label, v string) error {

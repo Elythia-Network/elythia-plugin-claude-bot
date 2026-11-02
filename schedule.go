@@ -37,6 +37,27 @@ func jobs(pctx plugin.Context, j plugin.Jobs) error {
 		}
 		return b.summarizeMemory(ctx, p.UserID)
 	})
+	j.Handle(jobReversiMove, func(ctx context.Context, raw json.RawMessage) error {
+		p, err := decodeReversiJob[reversiMoveJob](jobReversiMove, raw)
+		if err != nil {
+			return err
+		}
+		return b.reversiMove(ctx, p)
+	})
+	j.Handle(jobReversiTimeout, func(ctx context.Context, raw json.RawMessage) error {
+		p, err := decodeReversiJob[reversiMoveJob](jobReversiTimeout, raw)
+		if err != nil {
+			return err
+		}
+		return b.reversiTimeout(ctx, p)
+	})
+	j.Handle(jobReversiReadyTimeout, func(ctx context.Context, raw json.RawMessage) error {
+		p, err := decodeReversiJob[reversiReadyJob](jobReversiReadyTimeout, raw)
+		if err != nil {
+			return err
+		}
+		return b.reversiReadyTimeout(ctx, p)
+	})
 	// 予定は管理画面で変わるので、cron には固定の 1 分ごとの tick だけを
 	// 登録し、投稿するかどうかは tick の中で設定を見て決める。予定ごとに
 	// Schedule を呼ぶと、変えたときに起動し直すまで反映されない。
@@ -49,6 +70,9 @@ func jobs(pctx plugin.Context, j plugin.Jobs) error {
 func (b *bot) tick(ctx context.Context) error {
 	db := b.db()
 	if err := prune(ctx, db); err != nil {
+		return err
+	}
+	if err := pruneReversi(ctx, db); err != nil {
 		return err
 	}
 	s, err := loadSettings(ctx, db)

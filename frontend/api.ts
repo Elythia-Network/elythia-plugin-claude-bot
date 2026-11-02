@@ -83,6 +83,14 @@ export type Settings = {
 		keepRecent: number;
 		summarizeAt: number;
 	};
+	reversi: {
+		enabled: boolean;
+		audience: string;
+		level: number;
+		maxThinkMs: number;
+		maxGames: number;
+		readyTimeoutMinutes: number;
+	};
 	priceOverrides: PriceOverride[];
 };
 
@@ -164,6 +172,27 @@ export type MemoryResponse = {
 	exchanges: MemoryExchange[];
 	about: MemoryAbout | null;
 	summarizedAt: string | null;
+};
+
+/** One reversi game the bot accepted. */
+export type ReversiGame = {
+	gameId: string;
+	opponentId: string;
+	opponentAcct: string;
+	level: number;
+	color: 'black' | 'white' | null;
+	status: 'waiting' | 'playing' | 'ended' | 'canceled';
+	result: 'win' | 'lose' | 'draw' | null;
+	botStones: number | null;
+	opponentStones: number | null;
+	createdAt: string;
+	endedAt: string | null;
+};
+
+/** Response of admin/reversi/games (administrators only). */
+export type ReversiGamesResponse = {
+	games: ReversiGame[];
+	summary: { wins: number; losses: number; draws: number };
 };
 
 export type PriceRow = Price & {

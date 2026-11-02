@@ -349,6 +349,9 @@ type fakeAPI struct {
 	fail map[string]error
 	// raw makes an endpoint return the given body as is.
 	raw map[string]string
+	// handlers answer endpoints the switch below does not know. a.mu を
+	// 持ったまま呼ぶ。
+	handlers map[string]func(as string, p map[string]any) (any, error)
 }
 
 func newFakeAPI() *fakeAPI {
@@ -361,6 +364,7 @@ func newFakeAPI() *fakeAPI {
 		maxNote:      3000,
 		fail:         map[string]error{},
 		raw:          map[string]string{},
+		handlers:     map[string]func(string, map[string]any) (any, error){},
 	}
 }
 
@@ -402,6 +406,13 @@ func (c *fakeCaller) Call(_ context.Context, endpoint string, params any) (json.
 	}
 	if body, ok := a.raw[endpoint]; ok {
 		return json.RawMessage(body), nil
+	}
+	if h, ok := a.handlers[endpoint]; ok {
+		v, err := h(c.as, p)
+		if err != nil || v == nil {
+			return nil, err
+		}
+		return json.Marshal(v)
 	}
 
 	reply := func(v any) (json.RawMessage, error) {

@@ -156,4 +156,29 @@ ALTER TABLE memories
 	ADD COLUMN summarized_at     timestamptz,
 	ADD COLUMN summarizing_since timestamptz;
 `},
+	{Version: 5, SQL: `
+-- botが受けたリバーシの対局 (#24)。同時の対局の数と相手ごとに1局の判定、
+-- 管理画面の戦績に使う。本体の対局は通知が届くたびに読み直すので、ここには
+-- 盤面を持たない。level は受けたときの強さで、対局の途中で設定を変えても
+-- その対局の強さは変えない。
+CREATE TABLE reversi_games (
+	game_id         text PRIMARY KEY,
+	account_id      text NOT NULL,
+	opponent_id     text NOT NULL,
+	opponent_acct   text NOT NULL,
+	level           integer NOT NULL,
+	color           text,
+	status          text NOT NULL,
+	result          text,
+	bot_stones      integer,
+	opponent_stones integer,
+	created_at      timestamptz NOT NULL,
+	started_at      timestamptz,
+	ended_at        timestamptz,
+	updated_at      timestamptz NOT NULL
+);
+CREATE UNIQUE INDEX reversi_games_active_opponent ON reversi_games (opponent_id) WHERE status IN ('waiting', 'playing');
+CREATE INDEX reversi_games_status_updated ON reversi_games (status, updated_at);
+CREATE INDEX reversi_games_created ON reversi_games (created_at);
+`},
 }
