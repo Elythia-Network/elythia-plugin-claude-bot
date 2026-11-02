@@ -92,6 +92,13 @@ jobs:
           go test -race -count=1 -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -n 1
 
+      # リバーシの段階どうしの自己対戦は、-race と -coverprofile を同時に付けると
+      # -race だけのときの 100 倍以上遅くなるので、上の手順では飛ばし、ここで
+      # -race 無しで回す。
+      - name: Test reversi strength
+        working-directory: elythia/plugins/${{ env.PLUGIN_NAME }}
+        run: go test -count=1 -run '^TestStrongerLevelsWin$' -v ./reversi/
+
       - name: Build elythia with this plugin
         working-directory: elythia
         run: go build -o /dev/null ./cmd/elythia
