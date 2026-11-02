@@ -313,7 +313,8 @@ func (b *bot) readAndAdvance(ctx context.Context, accountID string, rec reversiR
 	if err != nil {
 		if isClientError(err) {
 			// 取り消された対局は読めない (本体は行を消す)。
-			return b.closeReversi(ctx, rec.GameID, reversiCanceled)
+			_, err := b.closeReversi(ctx, rec.GameID, reversiCanceled)
+			return err
 		}
 		return fmt.Errorf("reversi/show-game: %w", err)
 	}
@@ -367,28 +368,28 @@ func (b *bot) acceptReversi(ctx context.Context, accountID, gameID string) error
 		return err
 	}
 	if !ok {
-		b.logEvent(ctx, "info", eventReversi, "招待を受ける相手の範囲の外なので、リバーシの招待を受けませんでした", opp.ID, "")
+		b.logEvent(ctx, "info", eventReversi, reversiGameMessage("招待を受ける相手の範囲の外なので、リバーシの招待を受けませんでした", g.ID), opp.ID, "")
 		return nil
 	}
 	if err := g.playable(); err != nil {
-		b.logEvent(ctx, "info", eventReversi, "対応していない対局なので、リバーシの招待を受けませんでした: "+err.Error(), opp.ID, "")
+		b.logEvent(ctx, "info", eventReversi, reversiGameMessage("対応していない対局なので、リバーシの招待を受けませんでした: "+err.Error(), g.ID), opp.ID, "")
 		return nil
 	}
 	inserted, reason, err := insertReversiGame(ctx, db, accountID, g.ID, opp, rs)
 	if err != nil || !inserted {
 		if reason != "" {
-			b.logEvent(ctx, "info", eventReversi, reason, opp.ID, "")
+			b.logEvent(ctx, "info", eventReversi, reversiGameMessage(reason, g.ID), opp.ID, "")
 		}
 		// 理由が無いのは、同じ招待の通知が並行して届き、もう一方が先に記録した
 		// とき。受けるのはそちらに任せる。
 		return err
 	}
-	b.logEvent(ctx, "info", eventReversi, fmt.Sprintf("%s からのリバーシの招待を受けました (強さ %d)", opp.acct(), rs.Level), opp.ID, "")
+	b.logEvent(ctx, "info", eventReversi, reversiGameMessage(fmt.Sprintf("%s からのリバーシの招待を受けました (強さ %d)", opp.acct(), rs.Level), g.ID), opp.ID, "")
 	err = b.enqueueReversi(ctx, jobReversiReadyTimeout, reversiReadyJob{AccountID: accountID, GameID: g.ID},
 		plugin.WithDelay(time.Duration(rs.ReadyTimeoutMinutes)*time.Minute))
 	if err != nil {
 		// 積めなくても対局は進められる。始まらない対局は tick の掃除が閉じる。
-		b.logEvent(ctx, "warn", eventReversi, "準備を待つ期限のjobを積めませんでした: "+err.Error(), opp.ID, "")
+		b.logEvent(ctx, "warn", eventReversi, reversiGameMessage("準備を待つ期限のjobを積めませんでした: "+err.Error(), g.ID), opp.ID, "")
 	}
 	// 読み直すと、本体が招待者へ受諾を配る。失敗したら通知の再試行で、記録の
 	// ある対局として読み直す。
@@ -461,10 +462,48 @@ func setReady(ctx context.Context, as plugin.Caller, gameID string, ready bool) 
 }
 
 // surrender gives up a game in progress.
-func (b *bot) surrender(ctx context.Context, as plugin.Caller, gameID, why string) error {
-	b.logEvent(ctx, "warn", eventReversi, why, "", "")
-	if _, err := as.Call(ctx, "reversi/surrender", map[string]any{"gameId": gameID}); err != nil && !isClientError(err) {
+func (b *bot) surrender(ctx context.Context, as plugin.Caller, g reversiGameView, why string) error {
+	b.logEvent(ctx, "warn", eventReversi, reversiGameMessage(why, g.ID), g.User1ID, "")
+	if _, err := as.Call(ctx, "reversi/surrender", map[string]any{"gameId": g.ID}); err != nil && !isClientError(err) {
 		return fmt.Errorf("reversi/surrender: %w", err)
+	}
+	return nil
+}
+
+// reversiGameMessage appends the game ID to an event message, so the admin
+// can find the game the event is about.
+func reversiGameMessage(msg, gameID string) string {
+	return fmt.Sprintf("%s (対局 %s)", msg, gameID)
+}
+
+// pauseReversi waits on a game that has not started and whose settings the
+// bot cannot play, without readiness.
+//
+// 招待された側は本体の REST で対局を取り消せない (cancel-match は自分が送った
+// 招待だけ)。招待した人が盤に誤って触れただけのこともあるので、記録は閉じずに
+// 待ち、受けられる設定に戻れば準備し直す。待つのは準備の期限まで。
+func (b *bot) pauseReversi(ctx context.Context, as plugin.Caller, accountID string, g reversiGameView, why error) error {
+	res, err := b.db().ExecContext(ctx, `
+UPDATE reversi_games SET paused = true WHERE game_id = $1 AND status = 'waiting' AND NOT paused`, g.ID)
+	if err != nil {
+		return fmt.Errorf("pause reversi game: %w", err)
+	}
+	// 同時に届いた通知のうち、印を立てた方だけが記録を残す。updated_at は
+	// 変えない。設定を切り替え続けられても、掃除 (pruneReversi) で閉じられるように。
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		b.logEvent(ctx, "info", eventReversi, reversiGameMessage("受けられない設定に変わったので、リバーシの準備をせずに待ちます。受けられる設定に戻れば準備します: "+why.Error(), g.ID), g.User1ID, "")
+	}
+	if !g.ready(accountID) {
+		return nil
+	}
+	return setReady(ctx, as, g.ID, false)
+}
+
+// resumeReversi clears the mark of pauseReversi, so the next change to
+// settings the bot cannot play is recorded again.
+func resumeReversi(ctx context.Context, db *sql.DB, gameID string) error {
+	if _, err := db.ExecContext(ctx, `UPDATE reversi_games SET paused = false WHERE game_id = $1 AND status = 'waiting' AND paused`, gameID); err != nil {
+		return fmt.Errorf("resume reversi game: %w", err)
 	}
 	return nil
 }
@@ -484,7 +523,7 @@ func (b *bot) settleClosed(ctx context.Context, as plugin.Caller, accountID stri
 		}
 		return setReady(ctx, as, g.ID, false)
 	default:
-		return b.surrender(ctx, as, g.ID, "やめたリバーシの対局が始まっていたので、投了しました")
+		return b.surrender(ctx, as, g, "やめたリバーシの対局が始まっていたので、投了しました")
 	}
 }
 
@@ -496,13 +535,10 @@ func (b *bot) advanceReversi(ctx context.Context, as plugin.Caller, accountID st
 	playable := g.playable()
 	if !g.IsStarted {
 		if playable != nil {
-			// 招待された側は本体の REST で対局を取り消せない (cancel-match は自分が
-			// 送った招待だけ)。準備を外して始まらないようにし、記録を閉じる。
-			b.logEvent(ctx, "info", eventReversi, "対応していない設定に変わったので、リバーシの対局をやめました: "+playable.Error(), "", "")
-			if err := b.closeReversi(ctx, g.ID, reversiCanceled); err != nil {
-				return err
-			}
-			return b.settleClosed(ctx, as, accountID, g)
+			return b.pauseReversi(ctx, as, accountID, g, playable)
+		}
+		if err := resumeReversi(ctx, b.db(), g.ID); err != nil {
+			return err
 		}
 		if g.ready(accountID) {
 			return nil
@@ -511,7 +547,7 @@ func (b *bot) advanceReversi(ctx context.Context, as plugin.Caller, accountID st
 	}
 	if playable != nil {
 		// 準備と設定の変更が交差して、対応していない設定で始まった。投了する。
-		return b.surrender(ctx, as, g.ID, "対応していない設定で始まったので、リバーシの対局を投了しました: "+playable.Error())
+		return b.surrender(ctx, as, g, "対応していない設定で始まったので、リバーシの対局を投了しました: "+playable.Error())
 	}
 	color, err := g.color(accountID)
 	if err != nil {
@@ -519,7 +555,7 @@ func (b *bot) advanceReversi(ctx context.Context, as plugin.Caller, accountID st
 	}
 	game, ply, err := g.replay()
 	if err != nil {
-		b.logEvent(ctx, "error", eventReversi, "リバーシの手順を再現できません: "+err.Error(), "", "")
+		b.logEvent(ctx, "error", eventReversi, reversiGameMessage("リバーシの手順を再現できません: "+err.Error(), g.ID), g.User1ID, "")
 		return plugin.NoRetry(err)
 	}
 	if rec.Status == reversiWaiting {
@@ -572,16 +608,21 @@ WHERE game_id = $1 AND status IN ('waiting', 'playing')`, g.ID, result, mine, th
 	return nil
 }
 
-// closeReversi closes an open record without a result.
-func (b *bot) closeReversi(ctx context.Context, gameID, status string) error {
+// closeReversi closes an open record without a result. closed is false when
+// the record was not open.
+func (b *bot) closeReversi(ctx context.Context, gameID, status string) (closed bool, err error) {
 	t := now()
-	_, err := b.db().ExecContext(ctx, `
+	res, err := b.db().ExecContext(ctx, `
 UPDATE reversi_games SET status = $2, ended_at = $3, updated_at = $3
 WHERE game_id = $1 AND status IN ('waiting', 'playing')`, gameID, status, t)
 	if err != nil {
-		return fmt.Errorf("close reversi game: %w", err)
+		return false, fmt.Errorf("close reversi game: %w", err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("close reversi game: %w", err)
+	}
+	return n > 0, nil
 }
 
 // reversiJobGame reads the game for a job. ok is false when there is nothing
@@ -594,7 +635,8 @@ func (b *bot) reversiJobGame(ctx context.Context, p reversiMoveJob) (rec reversi
 	g, err = b.showGame(ctx, b.pctx.API().AsUser(p.AccountID), p.GameID)
 	if err != nil {
 		if isClientError(err) {
-			return rec, g, game, color, false, b.closeReversi(ctx, p.GameID, reversiCanceled)
+			_, err = b.closeReversi(ctx, p.GameID, reversiCanceled)
+			return rec, g, game, color, false, err
 		}
 		return rec, g, game, color, false, fmt.Errorf("reversi/show-game: %w", err)
 	}
@@ -686,7 +728,8 @@ func (b *bot) reversiReadyTimeout(ctx context.Context, p reversiReadyJob) error 
 	g, err := b.showGame(ctx, as, p.GameID)
 	if err != nil {
 		if isClientError(err) {
-			return b.closeReversi(ctx, p.GameID, reversiCanceled)
+			_, err := b.closeReversi(ctx, p.GameID, reversiCanceled)
+			return err
 		}
 		return fmt.Errorf("reversi/show-game: %w", err)
 	}
@@ -694,10 +737,18 @@ func (b *bot) reversiReadyTimeout(ctx context.Context, p reversiReadyJob) error 
 		if g.IsStarted || g.IsEnded {
 			return b.advanceReversi(ctx, as, p.AccountID, rec, g)
 		}
-		b.logEvent(ctx, "info", eventReversi, "相手が準備しないまま時間が過ぎたので、リバーシの対局をやめました", "", "")
 		// 先に記録を閉じる。準備を外した後で閉じると、その間に届いた通知が準備し直す。
-		if err := b.closeReversi(ctx, p.GameID, reversiCanceled); err != nil {
+		closed, err := b.closeReversi(ctx, p.GameID, reversiCanceled)
+		if err != nil {
 			return err
+		}
+		if closed {
+			why := "相手が準備しないまま時間が過ぎたので、リバーシの対局をやめました"
+			// 印ではなく今の設定で決める。印は、通知の競合で立ったまま残ることがある。
+			if g.playable() != nil {
+				why = "受けられない設定のまま準備の期限が過ぎたので、リバーシの対局をやめました"
+			}
+			b.logEvent(ctx, "info", eventReversi, reversiGameMessage(why, g.ID), g.User1ID, "")
 		}
 	}
 	return b.settleClosed(ctx, as, p.AccountID, g)

@@ -181,4 +181,9 @@ CREATE UNIQUE INDEX reversi_games_active_opponent ON reversi_games (opponent_id)
 CREATE INDEX reversi_games_status_updated ON reversi_games (status, updated_at);
 CREATE INDEX reversi_games_created ON reversi_games (created_at);
 `},
+	{Version: 6, SQL: `
+-- 始まる前の対局が受けられない設定に変わり、準備を外して待っている印 (#27)。
+-- 印を立てた通知だけが記録を残し、受けられる設定に戻ったら外す。
+ALTER TABLE reversi_games ADD COLUMN paused boolean NOT NULL DEFAULT false;
+`},
 }
