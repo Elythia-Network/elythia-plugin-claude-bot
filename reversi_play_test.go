@@ -444,7 +444,10 @@ func TestReversiAcceptsInvitation(t *testing.T) {
 	require.NoError(t, e.db.QueryRow(`SELECT level, opponent_acct FROM reversi_games WHERE game_id = 'g1'`).Scan(&level, &acct))
 	assert.Equal(t, reversi.DefaultLevel, level)
 	assert.Equal(t, "@alice", acct)
-	assert.NotEmpty(t, e.events(eventReversi))
+	msgs, users := e.reversiEvents()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "@alice からのリバーシの招待を受けました (強さ 3) (対局 g1)", msgs[0])
+	assert.Equal(t, "alice", users[0])
 	// 相手は一覧に載っているので、読みに行かない。
 	assert.Empty(t, e.callsAs("users/show"))
 }
@@ -661,7 +664,27 @@ func TestReversiReadyAgainAfterSettingsChange(t *testing.T) {
 	assert.True(t, e.host.game("g1").Ready2)
 }
 
-func TestReversiGivesUpNonStandardBoard(t *testing.T) {
+// reversiEvents returns the messages of the reversi events, oldest first,
+// with the user each is about.
+func (e *reversiEnv) reversiEvents() (msgs, users []string) {
+	e.t.Helper()
+	evs := e.events(eventReversi)
+	for i := len(evs) - 1; i >= 0; i-- {
+		msgs = append(msgs, evs[i].Message)
+		users = append(users, evs[i].UserID)
+	}
+	return msgs, users
+}
+
+// paused reports the paused mark of a game's row.
+func (e *reversiEnv) paused(gameID string) bool {
+	e.t.Helper()
+	var p bool
+	require.NoError(e.t, e.db.QueryRow(`SELECT paused FROM reversi_games WHERE game_id = $1`, gameID).Scan(&p))
+	return p
+}
+
+func TestReversiPausesOnUnsupportedSettings(t *testing.T) {
 	e := newReversiEnv(t, nil)
 	e.accept("g1")
 	e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
@@ -671,36 +694,121 @@ func TestReversiGivesUpNonStandardBoard(t *testing.T) {
 	require.Len(t, ready, 2)
 	assert.Equal(t, false, ready[1].Params["ready"])
 	assert.False(t, e.host.game("g1").Ready2)
+	// 記録は閉じずに待つ。
 	status, _ := e.record("g1")
-	assert.Equal(t, reversiCanceled, status)
-	// やめた後で盤が標準に戻っても、準備し直さない。
-	e.host.with("g1", func(g *fakeGame) { g.Llotheo = false })
+	assert.Equal(t, reversiWaiting, status)
+	assert.True(t, e.paused("g1"))
+	msgs, users := e.reversiEvents()
+	require.Len(t, msgs, 2)
+	assert.Contains(t, msgs[1], "準備をせずに待ちます")
+	assert.Contains(t, msgs[1], "isLlotheo")
+	assert.Contains(t, msgs[1], "(対局 g1)")
+	assert.Equal(t, "alice", users[1])
+
+	// 受けられない設定のまま届いた通知は、記録を増やさず、準備も触らない。
+	e.host.with("g1", func(g *fakeGame) { g.Map = []string{"--------"} })
 	require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
 	assert.Len(t, e.callsAs("reversi/ready"), 2)
+	msgs, _ = e.reversiEvents()
+	assert.Len(t, msgs, 2)
 
-	// 準備していなければ、外しに行かない。
-	e.host.invite("g2", "bob", e.botID)
-	require.NoError(t, e.invited("g2", "bob"))
-	e.host.with("g2", func(g *fakeGame) { g.Ready2, g.Map = false, []string{"--------"} })
-	require.NoError(t, e.progressed("g2", plugin.ReversiGameSettings))
-	assert.Len(t, e.callsAs("reversi/ready"), 3)
-	status, _ = e.record("g2")
-	assert.Equal(t, reversiCanceled, status)
+	// 受けられる設定に戻れば、準備し直す。
+	e.host.with("g1", func(g *fakeGame) { g.Llotheo, g.Map = false, nil })
+	require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+	ready = e.callsAs("reversi/ready")
+	require.Len(t, ready, 3)
+	assert.Equal(t, true, ready[2].Params["ready"])
+	assert.True(t, e.host.game("g1").Ready2)
+	assert.False(t, e.paused("g1"))
+
+	// もう一度変わったら、また記録を残す。
+	e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
+	require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+	msgs, _ = e.reversiEvents()
+	assert.Len(t, msgs, 3)
+	assert.False(t, e.host.game("g1").Ready2)
+
+	// 戻した後で始まれば、そのまま打つ。
+	e.host.with("g1", func(g *fakeGame) { g.Llotheo = false })
+	require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+	e.start("g1", 2)
+	status, _ = e.record("g1")
+	assert.Equal(t, reversiPlaying, status)
+	assert.Len(t, e.enqueued(jobReversiMove), 1)
 }
 
-func TestReversiGiveUpReadyFails(t *testing.T) {
+func TestReversiPauseKeepsUpdatedAt(t *testing.T) {
+	// 設定を切り替え続けられても、掃除で閉じられるよう、印を立てても
+	// updated_at は変えない。
 	e := newReversiEnv(t, nil)
 	e.accept("g1")
+	var before, after time.Time
+	require.NoError(t, e.db.QueryRow(`SELECT updated_at FROM reversi_games WHERE game_id = 'g1'`).Scan(&before))
+	setClock(t, now().Add(time.Hour))
 	e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
-	e.api.fail["reversi/ready"] = apiErr("reversi/ready", 500, "INTERNAL_ERROR")
-	require.Error(t, e.progressed("g1", plugin.ReversiGameSettings))
-	// 記録は先に閉じる。準備を外すのは、通知の再試行が閉じた記録として行う。
-	status, _ := e.record("g1")
-	assert.Equal(t, reversiCanceled, status)
-	assert.True(t, e.host.game("g1").Ready2)
-	delete(e.api.fail, "reversi/ready")
 	require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
-	assert.False(t, e.host.game("g1").Ready2)
+	require.True(t, e.paused("g1"))
+	require.NoError(t, e.db.QueryRow(`SELECT updated_at FROM reversi_games WHERE game_id = 'g1'`).Scan(&after))
+	assert.True(t, before.Equal(after), "updated_at changed: %v -> %v", before, after)
+}
+
+func TestResumeReversiOnlyOpenRecords(t *testing.T) {
+	e := newReversiEnv(t, nil)
+	e.accept("g1")
+	_, err := e.db.Exec(`UPDATE reversi_games SET paused = true, status = 'canceled'`)
+	require.NoError(t, err)
+	require.NoError(t, resumeReversi(t.Context(), e.db, "g1"))
+	assert.True(t, e.paused("g1"))
+}
+
+func TestReversiPauseWhenNotReady(t *testing.T) {
+	// 準備していなければ、外しに行かない。
+	e := newReversiEnv(t, nil)
+	e.host.invite("g1", "bob", e.botID)
+	require.NoError(t, e.invited("g1", "bob"))
+	e.host.with("g1", func(g *fakeGame) { g.Ready2, g.Map = false, []string{"--------"} })
+	require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+	assert.Len(t, e.callsAs("reversi/ready"), 1)
+	assert.True(t, e.paused("g1"))
+	_, users := e.reversiEvents()
+	assert.Equal(t, "bob", users[len(users)-1])
+}
+
+func TestReversiPauseFails(t *testing.T) {
+	t.Run("ready", func(t *testing.T) {
+		e := newReversiEnv(t, nil)
+		e.accept("g1")
+		e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
+		e.api.fail["reversi/ready"] = apiErr("reversi/ready", 500, "INTERNAL_ERROR")
+		require.Error(t, e.progressed("g1", plugin.ReversiGameSettings))
+		assert.True(t, e.host.game("g1").Ready2)
+		// 通知の再試行で外す。記録は1度だけ残す。
+		delete(e.api.fail, "reversi/ready")
+		require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+		assert.False(t, e.host.game("g1").Ready2)
+		msgs, _ := e.reversiEvents()
+		assert.Len(t, msgs, 2)
+	})
+	t.Run("pausing the record", func(t *testing.T) {
+		e := newReversiEnv(t, nil)
+		e.accept("g1")
+		_, err := e.db.Exec(`ALTER TABLE reversi_games ADD CONSTRAINT never_paused CHECK (NOT paused)`)
+		require.NoError(t, err)
+		e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
+		require.Error(t, e.progressed("g1", plugin.ReversiGameSettings))
+		assert.True(t, e.host.game("g1").Ready2, "keeps ready until the record is marked")
+	})
+	t.Run("resuming the record", func(t *testing.T) {
+		e := newReversiEnv(t, nil)
+		e.accept("g1")
+		e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
+		require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+		_, err := e.db.Exec(`ALTER TABLE reversi_games ADD CONSTRAINT always_paused CHECK (paused)`)
+		require.NoError(t, err)
+		e.host.with("g1", func(g *fakeGame) { g.Llotheo = false })
+		require.Error(t, e.progressed("g1", plugin.ReversiGameSettings))
+		assert.False(t, e.host.game("g1").Ready2, "gets ready after the mark is cleared")
+	})
 }
 
 func TestReversiSettlesClosedGames(t *testing.T) {
@@ -777,6 +885,55 @@ func TestReversiReadyTimeout(t *testing.T) {
 		assert.False(t, e.host.game("g1").Ready2)
 		status, _ := e.record("g1")
 		assert.Equal(t, reversiCanceled, status)
+		msgs, users := e.reversiEvents()
+		require.Len(t, msgs, 2)
+		assert.Equal(t, "相手が準備しないまま時間が過ぎたので、リバーシの対局をやめました (対局 g1)", msgs[1])
+		assert.Equal(t, "alice", users[1])
+		// 再び動いても、閉じた記録について書き足さない。
+		require.NoError(t, e.jobs.Run(t, jobReversiReadyTimeout, payload(e, "g1")))
+		msgs, _ = e.reversiEvents()
+		assert.Len(t, msgs, 2)
+	})
+	t.Run("paused", func(t *testing.T) {
+		e := newReversiEnv(t, nil)
+		e.accept("g1")
+		e.host.with("g1", func(g *fakeGame) { g.Llotheo = true })
+		require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+		require.NoError(t, e.jobs.Run(t, jobReversiReadyTimeout, payload(e, "g1")))
+		status, _ := e.record("g1")
+		assert.Equal(t, reversiCanceled, status)
+		msgs, _ := e.reversiEvents()
+		require.Len(t, msgs, 3)
+		assert.Equal(t, "受けられない設定のまま準備の期限が過ぎたので、リバーシの対局をやめました (対局 g1)", msgs[2])
+		// 閉じた後で設定が戻っても、準備しない。
+		e.host.with("g1", func(g *fakeGame) { g.Llotheo = false })
+		require.NoError(t, e.progressed("g1", plugin.ReversiGameSettings))
+		assert.False(t, e.host.game("g1").Ready2)
+	})
+	t.Run("stale pause mark", func(t *testing.T) {
+		// 通知の競合で印が立ったまま残っても、文面は今の設定で決める。
+		e := newReversiEnv(t, nil)
+		e.accept("g1")
+		_, err := e.db.Exec(`UPDATE reversi_games SET paused = true`)
+		require.NoError(t, err)
+		require.NoError(t, e.jobs.Run(t, jobReversiReadyTimeout, payload(e, "g1")))
+		msgs, _ := e.reversiEvents()
+		assert.Equal(t, "相手が準備しないまま時間が過ぎたので、リバーシの対局をやめました (対局 g1)", msgs[len(msgs)-1])
+	})
+	t.Run("closed meanwhile", func(t *testing.T) {
+		// 読んでいる間に、別の処理 (掃除など) が記録を閉じた。やめた記録は
+		// 閉じた側に任せる。
+		e := newReversiEnv(t, nil)
+		e.accept("g1")
+		e.api.handlers["reversi/show-game"] = func(as string, p map[string]any) (any, error) {
+			_, err := e.db.Exec(`UPDATE reversi_games SET status = 'canceled'`)
+			require.NoError(t, err)
+			return e.host.showGame(as, p)
+		}
+		require.NoError(t, e.jobs.Run(t, jobReversiReadyTimeout, payload(e, "g1")))
+		assert.False(t, e.host.game("g1").Ready2)
+		msgs, _ := e.reversiEvents()
+		assert.Len(t, msgs, 1)
 	})
 	t.Run("started", func(t *testing.T) {
 		e := newReversiEnv(t, nil)
@@ -952,6 +1109,10 @@ func TestReversiBrokenGame(t *testing.T) {
 		err := e.progressed("g1", plugin.ReversiGameStarted)
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, plugin.ErrNoRetry))
+		msgs, users := e.reversiEvents()
+		assert.Contains(t, msgs[len(msgs)-1], "リバーシの手順を再現できません")
+		assert.Contains(t, msgs[len(msgs)-1], "(対局 g1)")
+		assert.Equal(t, "alice", users[len(users)-1])
 	})
 	t.Run("undecodable logs", func(t *testing.T) {
 		e := newReversiEnv(t, nil)
@@ -985,6 +1146,9 @@ func TestReversiStartedOnNonStandardBoard(t *testing.T) {
 	e.start("g1", 2)
 	require.Len(t, e.callsAs("reversi/surrender"), 1)
 	assert.True(t, e.host.game("g1").Ended)
+	msgs, users := e.reversiEvents()
+	assert.Equal(t, "対応していない設定で始まったので、リバーシの対局を投了しました: reversi: unsupported rules: isLlotheo (対局 g1)", msgs[len(msgs)-1])
+	assert.Equal(t, "alice", users[len(users)-1])
 	require.NoError(t, e.progressed("g1", plugin.ReversiGameEnded))
 	status, result := e.record("g1")
 	assert.Equal(t, reversiEnded, status)
