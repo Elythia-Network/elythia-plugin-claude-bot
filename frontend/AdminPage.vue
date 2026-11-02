@@ -241,6 +241,36 @@ SPDX-License-Identifier: AGPL-3.0-only
 			</div>
 		</MkFolder>
 
+		<!-- リバーシ -->
+		<MkFolder :defaultOpen="false">
+			<template #label>リバーシ</template>
+			<template #suffix>{{ draft.reversi.enabled ? '有効' : '無効' }}</template>
+			<div class="_gaps_s">
+				<MkSwitch v-model="draft.reversi.enabled">リバーシの招待を受けて対局する</MkSwitch>
+				<div :class="$style.note">
+					手はこのサーバーの中の探索で決めます。Claude APIは呼ばないので、使った量と予算には数えません。受けるのは、標準の8×8の盤で、特別なルールが無く、1手の持ち時間が15秒〜1時間の対局だけです。探索は返事と同じキューで動くので、返事が混んでいるとbotが時間切れで負けることがあります。
+				</div>
+				<MkSelect v-model="draft.reversi.audience" :items="reversiAudienceItems">
+					<template #label>招待を受ける相手</template>
+				</MkSelect>
+				<MkSelect v-model="reversiLevel" :items="reversiLevelItems">
+					<template #label>強さ</template>
+				</MkSelect>
+				<MkInput v-model="draft.reversi.maxThinkMs" type="number" :min="100" :max="10000">
+					<template #label>1手の考える時間の上限 (ミリ秒)</template>
+					<template #caption>100〜10000。その手番の残りの時間の3分の1も超えません。探索はキューの中で動くので、長くするとその間ほかの返事が待たされます。</template>
+				</MkInput>
+				<MkInput v-model="draft.reversi.maxGames" type="number" :min="1" :max="10">
+					<template #label>同時に進める対局の数</template>
+					<template #caption>1〜10。同じ相手とは同時に1局だけです。</template>
+				</MkInput>
+				<MkInput v-model="draft.reversi.readyTimeoutMinutes" type="number" :min="1" :max="720">
+					<template #label>相手の準備を待つ時間 (分)</template>
+					<template #caption>1〜720。この時間が過ぎても始まらない対局は、準備を取り消してやめます。</template>
+				</MkInput>
+			</div>
+		</MkFolder>
+
 		<!-- 定時の投稿 -->
 		<MkFolder :defaultOpen="false">
 			<template #label>定時の投稿</template>
@@ -443,6 +473,29 @@ SPDX-License-Identifier: AGPL-3.0-only
 			</div>
 		</MkFolder>
 
+		<!-- リバーシの戦績。対局した人が分かるので、管理者にだけ出す。 -->
+		<MkFolder v-if="state.canEdit" :defaultOpen="false">
+			<template #label>リバーシの戦績</template>
+			<template #suffix>{{ reversiSummary.wins }}勝 {{ reversiSummary.losses }}敗 {{ reversiSummary.draws }}分</template>
+			<div :class="$style.scroll">
+				<div v-if="reversiError" :class="$style.error">{{ reversiError }}</div>
+				<div v-else-if="reversiGames.length === 0" :class="$style.note">対局はありません。</div>
+				<table v-else :class="$style.table">
+					<thead><tr><th>日時</th><th>相手</th><th>強さ</th><th>色</th><th>状態</th><th>石の数</th></tr></thead>
+					<tbody>
+						<tr v-for="g in reversiGames" :key="g.gameId">
+							<td>{{ new Date(g.createdAt).toLocaleString() }}</td>
+							<td>{{ g.opponentAcct }}</td>
+							<td>{{ g.level }}</td>
+							<td>{{ g.color === 'black' ? '黒' : g.color === 'white' ? '白' : '-' }}</td>
+							<td>{{ reversiStatusLabel(g) }}</td>
+							<td>{{ g.botStones != null && g.opponentStones != null ? `${g.botStones} - ${g.opponentStones}` : '-' }}</td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
+		</MkFolder>
+
 		<!-- 記録。話しかけた人のIDやAPIのエラーの本文が入るので、管理者にだけ出す。 -->
 		<MkFolder v-if="state.canEdit" :defaultOpen="false">
 			<template #label>記録</template>
@@ -472,7 +525,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, fitAvatar, maxFetchesPerReply, readAsBase64, splitList, totalTokens, usd, webFetchTokensEstimate } from './api.js';
-import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryResponse, MemorySummary, PeriodUsage, Settings, State } from './api.js';
+import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryResponse, MemorySummary, PeriodUsage, ReversiGame, ReversiGamesResponse, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
 const events = ref<BotEvent[]>([]);
@@ -486,6 +539,9 @@ const memoryDetails = ref<Record<string, MemoryResponse>>({});
 const memoryErrors = ref<Record<string, string>>({});
 // 開いている人。一覧を読み直したときに、開いている人の本文だけを読み直す。
 const openMemories = new Set<string>();
+const reversiGames = ref<ReversiGame[]>([]);
+const reversiSummary = ref<ReversiGamesResponse['summary']>({ wins: 0, losses: 0, draws: 0 });
+const reversiError = ref('');
 const draft = ref<Settings | null>(null);
 const loadError = ref('');
 const saveError = ref('');
@@ -538,6 +594,37 @@ const memoryAudienceItems: Item[] = [
 	{ label: 'このサーバーの人だけ', value: 'local' },
 	{ label: '話しかけられる人すべて', value: 'everyone' },
 ];
+const reversiAudienceItems: Item[] = [
+	{ label: 'このサーバーの人だけ', value: 'local' },
+	{ label: 'botのフォロワーだけ', value: 'followers' },
+	{ label: '誰でも', value: 'everyone' },
+];
+const reversiLevelItems: Item[] = [
+	{ label: '1 入門', value: '1' },
+	{ label: '2 初級', value: '2' },
+	{ label: '3 中級', value: '3' },
+	{ label: '4 上級', value: '4' },
+	{ label: '5 最強', value: '5' },
+];
+// 選択肢の値は文字列にそろえ、設定には数で入れる。
+const reversiLevel = computed({
+	get: () => String(draft.value?.reversi.level ?? 3),
+	set: (v: string) => {
+		if (draft.value) draft.value.reversi.level = Number(v);
+	},
+});
+
+const reversiResultLabels: Record<string, string> = { win: '勝ち', lose: '負け', draw: '引き分け' };
+
+function reversiStatusLabel(g: ReversiGame): string {
+	switch (g.status) {
+		case 'waiting': return '準備中';
+		case 'playing': return '対局中';
+		case 'canceled': return '取りやめ';
+		default: return g.result ? reversiResultLabels[g.result] ?? g.result : '終局';
+	}
+}
+
 const overLimitItems: Item[] = [
 	{ label: '何もしない (沈黙)', value: 'silent' },
 	{ label: '決まった文で断る', value: 'message' },
@@ -555,6 +642,7 @@ const kindLabels: Record<string, string> = {
 	prompt_leak: 'プロンプトの写し',
 	web: 'web',
 	memory: '記憶',
+	reversi: 'リバーシ',
 };
 
 function kindLabel(kind: string): string {
@@ -598,6 +686,18 @@ async function loadEvents() {
 		eventsError.value = '';
 	} catch (err) {
 		eventsError.value = errorMessage(err);
+	}
+}
+
+// リバーシの戦績も、記録と同じく管理者だけが読める別のルートにある。
+async function loadReversiGames() {
+	try {
+		const res = await api<ReversiGamesResponse>('admin/reversi/games');
+		reversiGames.value = res.games;
+		reversiSummary.value = res.summary;
+		reversiError.value = '';
+	} catch (err) {
+		reversiError.value = errorMessage(err);
 	}
 }
 
@@ -701,6 +801,7 @@ function apply(s: State, keepDraft = false) {
 	if (s.canEdit) {
 		void loadEvents();
 		void loadMemories();
+		void loadReversiGames();
 	}
 }
 
@@ -771,6 +872,9 @@ function saveSettings() {
 	l.monthlyTokens = finite(l.monthlyTokens);
 	b.monthlyUsd = finite(b.monthlyUsd);
 	b.warnPercent = finite(b.warnPercent);
+	d.reversi.maxThinkMs = finite(d.reversi.maxThinkMs);
+	d.reversi.maxGames = finite(d.reversi.maxGames);
+	d.reversi.readyTimeoutMinutes = finite(d.reversi.readyTimeoutMinutes);
 	for (const o of d.priceOverrides) {
 		o.input = finite(o.input);
 		o.cacheWrite = finite(o.cacheWrite);

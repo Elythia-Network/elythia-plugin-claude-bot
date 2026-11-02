@@ -21,6 +21,7 @@ const (
 	eventPromptLeak = "prompt_leak"
 	eventWeb        = "web"
 	eventMemory     = "memory"
+	eventReversi    = "reversi"
 )
 
 // event is one line of the admin page's log.

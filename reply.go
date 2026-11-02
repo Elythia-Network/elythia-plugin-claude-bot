@@ -43,6 +43,8 @@ const staleClaim = 15 * time.Minute
 func (b *bot) handleNotification(ctx context.Context, ev plugin.Notification) error {
 	switch ev.Type {
 	case plugin.NotificationMention, plugin.NotificationReply:
+	case plugin.NotificationReversiInvited, plugin.NotificationReversiGame:
+		return b.onReversi(ctx, ev)
 	default:
 		// チャット (DM) や引用、知らない種類には反応しない。
 		return nil

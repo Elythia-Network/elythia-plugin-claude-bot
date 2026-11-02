@@ -26,6 +26,9 @@ import (
  *
  * 覚えている会話 (memories) も管理者だけが読める。話しかけた人の投稿と
  * botの返事の本文がそのまま入るため (#17)。
+ *
+ * リバーシの戦績 (#24) も管理者だけが読める。記録と同じく、対局した人の
+ * ID が入るため。
  */
 
 func routes(pctx plugin.Context, r plugin.Router) error {
@@ -39,6 +42,7 @@ func routes(pctx plugin.Context, r plugin.Router) error {
 	r.POST("/admin/memories", b.requireAdminToRead(b.routeMemories))
 	r.POST("/admin/memories/show", b.requireAdminToRead(b.routeShowMemory))
 	r.POST("/admin/memories/delete", b.requireAdmin(b.routeDeleteMemories))
+	r.POST("/admin/reversi/games", b.requireAdminToRead(b.routeReversiGames))
 	return nil
 }
 
@@ -383,6 +387,11 @@ func (b *bot) routeDeleteAccount(req plugin.Request) (any, error) {
 	if _, err := b.db().ExecContext(ctx, `DELETE FROM memories`); err != nil {
 		b.logEvent(ctx, "error", eventMemory, "botのアカウントを消した後、覚えた会話を消せませんでした: "+err.Error(), "", "")
 	}
+	// リバーシの戦績も、消したbotのもの。残すと作り直したbotの戦績に混ざり、
+	// 進行中の記録が同時の対局の枠を埋め続ける (#24)。
+	if _, err := b.db().ExecContext(ctx, `DELETE FROM reversi_games`); err != nil {
+		b.logEvent(ctx, "error", eventReversi, "botのアカウントを消した後、リバーシの戦績を消せませんでした: "+err.Error(), "", "")
+	}
 	return b.state(req)
 }
 
@@ -472,4 +481,21 @@ func (b *bot) routeDeleteMemories(req plugin.Request) (any, error) {
 		return nil, badRequest("消す相手 (userId) か、全部 (all) のどちらか一方を指定してください")
 	}
 	return b.memories(req)
+}
+
+// maxReversiGamesShown is how many games the admin page lists.
+const maxReversiGamesShown = 100
+
+// reversiGamesResponse is the admin page's reversi record (#24).
+type reversiGamesResponse struct {
+	Games   []reversiGameRow     `json:"games"`
+	Summary reversiRecordSummary `json:"summary"`
+}
+
+func (b *bot) routeReversiGames(req plugin.Request) (any, error) {
+	games, sum, err := listReversiGames(req.Context(), b.db(), maxReversiGamesShown)
+	if err != nil {
+		return nil, err
+	}
+	return &reversiGamesResponse{Games: games, Summary: sum}, nil
 }
