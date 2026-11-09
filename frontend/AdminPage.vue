@@ -444,9 +444,10 @@ SPDX-License-Identifier: AGPL-3.0-only
 							<div v-for="a in aboutOf(m.userId)" :key="'about'" :class="$style.message">
 								<div :class="$style.label">この人について<template v-if="a.summarizedAt"> ({{ new Date(a.summarizedAt).toLocaleString() }}に要約)</template></div>
 								<div v-if="a.about.callName" :class="$style.pre">呼び名: {{ a.about.callName }}</div>
-								<div v-if="a.about.likes.length > 0" :class="$style.pre">好きなもの・関心: {{ a.about.likes.join('、') }}</div>
-								<div v-if="a.about.topics.length > 0" :class="$style.pre">これまでに話した話題: {{ a.about.topics.join('、') }}</div>
-								<div v-if="a.about.notes" :class="$style.pre">メモ: {{ a.about.notes }}</div>
+								<template v-for="k in aboutKinds" :key="k.kind">
+									<div v-if="itemsOf(a.about, k.kind).length > 0" :class="$style.pre">{{ k.label }}:</div>
+									<div v-for="it in itemsOf(a.about, k.kind)" :key="it.id" :class="$style.pre">- {{ it.text }}<span v-if="hasTime(it.at)" :class="$style.note"> ({{ new Date(it.at).toLocaleDateString() }})</span></div>
+								</template>
 							</div>
 							<div v-for="(ex, i) in memoryDetails[m.userId]?.exchanges ?? []" :key="i" :class="$style.message">
 								<div :class="$style.note">{{ new Date(ex.at).toLocaleString() }} (投稿 {{ ex.noteId }}<template v-if="ex.replyId">、返事 {{ ex.replyId }}</template>)</div>
@@ -525,7 +526,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, fitAvatar, maxFetchesPerReply, readAsBase64, splitList, totalTokens, usd, webFetchTokensEstimate } from './api.js';
-import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryResponse, MemorySummary, PeriodUsage, ReversiGame, ReversiGamesResponse, Settings, State } from './api.js';
+import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryAboutItem, MemoryResponse, MemorySummary, PeriodUsage, ReversiGame, ReversiGamesResponse, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
 const events = ref<BotEvent[]>([]);
@@ -721,6 +722,23 @@ function applyMemories(res: MemoriesResponse) {
 function aboutOf(userId: string): { about: MemoryAbout; summarizedAt: string | null }[] {
 	const d = memoryDetails.value[userId];
 	return d?.about ? [{ about: d.about, summarizedAt: d.summarizedAt }] : [];
+}
+
+// 返事に渡すときと同じ区分と順で並べる (memory.go の aboutKinds)。
+const aboutKinds: { kind: MemoryAboutItem['kind']; label: string }[] = [
+	{ kind: 'like', label: '好きなもの・関心' },
+	{ kind: 'topic', label: 'これまでに話した話題' },
+	{ kind: 'fact', label: 'メモ' },
+];
+
+// 要約した時刻が無い #18 の要約を読み替えた項目は、時刻がGoのゼロ値 (1年) になる。
+function hasTime(at: string): boolean {
+	return new Date(at).getUTCFullYear() > 1;
+}
+
+// 項目は古い順に届くので、新しい方を上に出す。
+function itemsOf(about: MemoryAbout, kind: MemoryAboutItem['kind']): MemoryAboutItem[] {
+	return about.items.filter(it => it.kind === kind).reverse();
 }
 
 function listed(userId: string): boolean {

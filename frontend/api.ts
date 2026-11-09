@@ -152,12 +152,20 @@ export type MemorySummary = {
 	hasSummary: boolean;
 };
 
+/** One thing the bot remembers of a person. */
+export type MemoryAboutItem = {
+	id: string;
+	kind: 'like' | 'topic' | 'fact';
+	text: string;
+	at: string;
+};
+
 /** What the bot remembers of a person, written by the summarizer. */
 export type MemoryAbout = {
 	callName: string;
-	likes: string[];
-	topics: string[];
-	notes: string;
+	/** Oldest first. */
+	items: MemoryAboutItem[];
+	nextId: number;
 };
 
 /** Response of admin/memories and admin/memories/delete (administrators only). */
