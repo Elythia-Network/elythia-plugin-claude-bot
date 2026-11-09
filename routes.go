@@ -1,6 +1,7 @@
 package claudebot
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -424,6 +425,9 @@ type memoryResponse struct {
 	// About is the summary (#18). 無ければ null。
 	About        *about     `json:"about"`
 	SummarizedAt *time.Time `json:"summarizedAt"`
+	// LastSelection is what was passed to the last reply when choosing is on
+	// (#31). 無ければ null。
+	LastSelection *memorySelection `json:"lastSelection"`
 }
 
 func (b *bot) routeShowMemory(req plugin.Request) (any, error) {
@@ -444,7 +448,20 @@ func (b *bot) routeShowMemory(req plugin.Request) (any, error) {
 	if mem.Exchanges == nil {
 		mem.Exchanges = []exchange{}
 	}
-	return &memoryResponse{UserID: body.UserID, Exchanges: mem.Exchanges, About: mem.About, SummarizedAt: mem.SummarizedAt}, nil
+	res := &memoryResponse{UserID: body.UserID, Exchanges: mem.Exchanges, About: mem.About, SummarizedAt: mem.SummarizedAt}
+	var raw []byte
+	err = b.db().QueryRowContext(req.Context(), `SELECT last_selection FROM memories WHERE user_id = $1`, body.UserID).Scan(&raw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("last selection: %w", err)
+	}
+	// 読めない値は無かったものとして扱う (次の返事で書き直される)。
+	if len(raw) > 0 && string(raw) != "null" {
+		var sel memorySelection
+		if json.Unmarshal(raw, &sel) == nil {
+			res.LastSelection = &sel
+		}
+	}
+	return res, nil
 }
 
 func (b *bot) routeDeleteMemories(req plugin.Request) (any, error) {
@@ -464,7 +481,7 @@ func (b *bot) routeDeleteMemories(req plugin.Request) (any, error) {
 	case body.SummaryOnly && !body.All && body.UserID != "":
 		// 要約しているjobの印も外す。外さないと、jobが消した要約を材料にした
 		// 新しい要約を書き戻す。
-		if _, err := b.db().ExecContext(ctx, `UPDATE memories SET summary = NULL, summarized_at = NULL, summarizing_since = NULL WHERE user_id = $1`, body.UserID); err != nil {
+		if _, err := b.db().ExecContext(ctx, `UPDATE memories SET summary = NULL, summarized_at = NULL, summarizing_since = NULL, last_selection = NULL WHERE user_id = $1`, body.UserID); err != nil {
 			return nil, fmt.Errorf("forget summary: %w", err)
 		}
 	case body.SummaryOnly:

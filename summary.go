@@ -66,9 +66,6 @@ const (
 	// 差分で返させるので、足す・書き換える項目の上限 (20 × 2 × 100) に、
 	// 消すID・呼び名・JSONの記号の分を足した目安。
 	summaryMaxChars = 5000
-	// maxAboutPromptChars is how much of the summary items goes into a reply.
-	// #18 の決まった欄の合計 (1330文字) と同じくらいにする。
-	maxAboutPromptChars = 1500
 )
 
 // Kinds of summary items.
@@ -231,7 +228,7 @@ func (a about) empty() bool {
 }
 
 // recent returns the newest items that fit in budget characters, oldest
-// first. #31 で選ばないときの渡し方。
+// first. 選ばないとき (#31) の渡し方。
 func (a about) recent(budget int) []aboutItem {
 	used, from := 0, len(a.Items)
 	for i := len(a.Items) - 1; i >= 0; i-- {

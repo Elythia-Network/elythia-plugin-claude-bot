@@ -137,6 +137,13 @@ type MemorySettings struct {
 	// SummarizeAt is how many exchanges are kept before they are summarized
 	// (#18). 0 means never summarize.
 	SummarizeAt int `json:"summarizeAt"`
+	// Select asks SelectModel to choose the remembered items and exchanges
+	// related to the note being answered (#31). 試験的な機能で、既定はOFF。
+	Select bool `json:"select"`
+	// SelectModel is the model that chooses (e.g. "claude-haiku-5-5").
+	SelectModel string `json:"selectModel"`
+	// PromptChars is how many characters of summary items go into a reply.
+	PromptChars int `json:"promptChars"`
 }
 
 // ReversiSettings controls playing reversi with the bot (#24).
@@ -269,6 +276,9 @@ func defaultSettings() Settings {
 			Audience:    "local",
 			KeepRecent:  5,
 			SummarizeAt: 20,
+			SelectModel: "claude-haiku-5-5",
+			// #18 の決まった欄の合計 (1330文字) と同じくらいにする。
+			PromptChars: 1500,
 		},
 		Reversi: ReversiSettings{
 			Audience:            "local",
@@ -365,6 +375,11 @@ const (
 	// この2倍になる。要約するまでの数は、覚えておく数に maxSummaryBatch を
 	// 足した数までにする (下の検証) ので、それより大きくはならない。
 	maxMemorySummarizeAt = maxMemoryKeepRecent + maxSummaryBatch
+	// minMemoryPromptChars / maxMemoryPromptChars bound the characters of
+	// summary items in a reply. 下限は項目 (100文字まで) が3つは入る数。上限は
+	// 保存できる項目の全部 (60 × 100) が入る数。
+	minMemoryPromptChars = 3 * maxAboutItemText
+	maxMemoryPromptChars = maxAboutItems * maxAboutItemText
 	// minSummaryGap は、要約するまでの数と覚えておく数の差の下限。要約は
 	// 記録がこの差の分だけ増えるたびに呼ぶ。差が小さいと、返事のたびに要約を
 	// 呼ぶことになる (要約の呼び出しは回数の上限に数えない)。
@@ -444,6 +459,15 @@ func (s Settings) validate(maxNoteLength int) ([]string, error) {
 	if !known {
 		warnings = append(warnings, fmt.Sprintf(
 			"モデル %q は単価の表にありません。effort に対応しているかを確かめられず、使った額は「単価が未設定」になります (単価の上書きで設定できます)。", s.Model))
+	}
+	// 単価の無いモデルの呼び出しは額に入らないので知らせる。返事のモデルと違って
+	// 保存は止めない。選ぶ呼び出しは返事の前に費用の上限を通ったときだけで、
+	// 返事の呼び出しが額に入るので、予算を使い切れば選ぶ呼び出しも止まる。
+	if s.Memory.Enabled && s.Memory.Select {
+		if _, ok := newPricer(s.PriceOverrides).lookup(s.Memory.SelectModel, 0); !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"記憶を選ぶモデル %q は単価の表にありません。選ぶ呼び出しの額は「単価が未設定」になります (単価の上書きで設定できます)。", s.Memory.SelectModel))
+		}
 	}
 	return warnings, nil
 }
@@ -556,6 +580,14 @@ func (s Settings) check(maxNoteLength int) error {
 	// 要約の後も記録が覚えておく数まで減らず、相手の発言が説明より長く残るため。
 	if n := s.Memory.SummarizeAt; n != 0 && (n < s.Memory.KeepRecent+minSummaryGap || n > s.Memory.KeepRecent+maxSummaryBatch) {
 		return badRequest("要約するまでのやり取りの数は、覚えておく数 (%d) に%dを足した数以上、%dを足した数以下にしてください (0で要約しない)", s.Memory.KeepRecent, minSummaryGap, maxSummaryBatch)
+	}
+
+	if s.Memory.PromptChars < minMemoryPromptChars || s.Memory.PromptChars > maxMemoryPromptChars {
+		return badRequest("返事に渡す覚え書きの文字数は%d〜%dにしてください", minMemoryPromptChars, maxMemoryPromptChars)
+	}
+	// 選ばない間はモデルの欄を画面に出さないので、ONのときだけ確かめる。
+	if s.Memory.Select && !modelPattern.MatchString(s.Memory.SelectModel) {
+		return badRequest("記憶を選ぶモデルのIDが不正です")
 	}
 
 	if err := s.Reversi.check(); err != nil {

@@ -659,19 +659,6 @@ func TestMemoryPrompt_About(t *testing.T) {
 	assert.Contains(t, memoryPrompt(nil, ab, userLite{Username: "alice"}, time.UTC, true), "［画像1］", "画像を送るときは角括弧を全角にする")
 }
 
-func TestMemoryPrompt_AboutWithinTheBudget(t *testing.T) {
-	t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	ab := &about{CallName: "ありす"}
-	n := maxAboutPromptChars/maxAboutItemText + 3
-	for i := 1; i <= n; i++ {
-		ab.Items = append(ab.Items, aboutItem{ID: strconv.Itoa(i), Kind: aboutFact, Text: fmt.Sprintf("%03d", i) + strings.Repeat("あ", maxAboutItemText-3), At: t0.Add(time.Duration(i) * time.Minute)})
-	}
-	p := memoryPrompt(nil, ab, userLite{Username: "alice"}, time.UTC, false)
-	assert.Contains(t, p, fmt.Sprintf("- %03d", n), "新しい項目を渡す")
-	assert.Contains(t, p, fmt.Sprintf("- %03d", n-maxAboutPromptChars/maxAboutItemText+1))
-	assert.NotContains(t, p, fmt.Sprintf("- %03d", n-maxAboutPromptChars/maxAboutItemText), "予算を超える古い項目は渡さない")
-}
-
 func TestSummary_LegacyAboutIsSentAsItems(t *testing.T) {
 	e := summaryEnv(t, nil)
 	_, err := e.db.Exec(`INSERT INTO memories (user_id, acct, exchanges, updated_at, summary, summarized_at) VALUES ('alice', '@alice', '[]', now(), '{"callName":"ありす","likes":["猫"],"topics":["引っ越し"],"notes":"朝が苦手"}', now())`)

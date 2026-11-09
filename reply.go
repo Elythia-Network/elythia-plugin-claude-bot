@@ -197,10 +197,12 @@ func (b *bot) respond(ctx context.Context, ev plugin.Notification, d draft) (str
 		}
 		// 下書きがある再試行ではClaudeを呼ばないので、画像もここでだけ取る。
 		vr := b.collectImages(ctx, s.Vision, note, ctxNotes, s.Reply.ContextNotes)
-		mem, err := b.recallFor(ctx, s.Memory, note, promptThread(ctxNotes, s.Reply.ContextNotes))
+		ancestors := promptThread(ctxNotes, s.Reply.ContextNotes)
+		mem, err := b.recallFor(ctx, s.Memory, note, ancestors)
 		if err != nil {
 			return "", err
 		}
+		mem = b.chooseMemory(ctx, s, note, ancestors, mem)
 		threadPrompt := replyPrompt(ctxNotes, note, ev.AccountID, s.Reply.ContextNotes, vr)
 		prompt := memoryPrompt(mem.Exchanges, mem.About, note.User, s.location(), len(vr.imageList()) > 0) + threadPrompt
 		// webも、Claudeを呼ぶときにだけ使えるかを決めて回数を取り置く (#11)。
@@ -341,8 +343,8 @@ func (b *bot) postReply(ctx context.Context, as plugin.Caller, note noteView, sc
 	return outcome, created.CreatedNote.ID, nil
 }
 
-// recallFor returns what the bot remembers of the note's author, leaving out
-// the exchanges the thread already sends.
+// recallFor returns everything the bot remembers of the note's author,
+// leaving out the exchanges the thread already sends.
 //
 // sentはプロンプトに入れる祖先 (promptThreadの結果)。そこか返事をする投稿に
 // 相手の投稿があるやり取りは、スレッドの側で送るので記憶から除く。botの返事に
@@ -360,7 +362,8 @@ func (b *bot) recallFor(ctx context.Context, m MemorySettings, note noteView, se
 	for _, n := range sent {
 		skip[n.ID] = true
 	}
-	mem, err := recallMemory(ctx, b.db(), note.User.ID, skip, m.KeepRecent)
+	// 渡す数は chooseMemory で決めるので、ここでは全部を読む。
+	mem, err := recallMemory(ctx, b.db(), note.User.ID, skip, maxMemorySummarizeAt*2)
 	if errors.Is(err, errMemoryDecode) {
 		b.logEvent(ctx, "error", eventMemory, "覚えた会話を読めないため、使わずに返事をします: "+err.Error(), note.User.ID, note.ID)
 		return memoryView{}, nil

@@ -219,6 +219,16 @@ func summarize(ctx context.Context, db *sql.DB, s Settings) (usageSummary, error
 // 増えるたびに1回しか呼ばないため。tokenの量と予算には数える。
 const kindMemory = "memory"
 
+// kindMemorySelect is the usage_log kind of the calls that choose the
+// memories for a reply (#31).
+//
+// kindMemory と同じく、回数の上限には数えない。返事1回につき高々1回で、
+// その返事の呼び出しが回数に数えられるため。tokenの量と予算には数える。
+const kindMemorySelect = "memory_select"
+
+// uncountedKinds are the usage_log kinds not counted as calls.
+var uncountedKinds = []string{kindMemory, kindMemorySelect}
+
 // checkLimits explains why a call is not allowed, or "" when it is.
 //
 // userID が空なら (定時の投稿) 1 人あたりの上限は見ない。host が空なら
@@ -232,7 +242,7 @@ func checkLimits(ctx context.Context, db *sql.DB, s Settings, userID, host strin
 	if userID != "" && l.PerUserPerHour > 0 {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM usage_log WHERE user_id = $1 AND at > $2 AND kind <> $3`, userID, t.Add(-time.Hour), kindMemory).Scan(&n); err != nil {
+			`SELECT count(*) FROM usage_log WHERE user_id = $1 AND at > $2 AND kind <> ALL($3::text[])`, userID, t.Add(-time.Hour), uncountedKinds).Scan(&n); err != nil {
 			return "", fmt.Errorf("limit per user: %w", err)
 		}
 		if n >= l.PerUserPerHour {
@@ -242,7 +252,7 @@ func checkLimits(ctx context.Context, db *sql.DB, s Settings, userID, host strin
 	if host != "" && l.PerHostPerDay > 0 {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM usage_log WHERE host = $1 AND at >= $2 AND kind <> $3`, host, day, kindMemory).Scan(&n); err != nil {
+			`SELECT count(*) FROM usage_log WHERE host = $1 AND at >= $2 AND kind <> ALL($3::text[])`, host, day, uncountedKinds).Scan(&n); err != nil {
 			return "", fmt.Errorf("limit per host: %w", err)
 		}
 		if n >= l.PerHostPerDay {
@@ -252,7 +262,7 @@ func checkLimits(ctx context.Context, db *sql.DB, s Settings, userID, host strin
 	if l.GlobalPerDay > 0 {
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM usage_log WHERE at >= $1 AND kind <> $2`, day, kindMemory).Scan(&n); err != nil {
+			`SELECT count(*) FROM usage_log WHERE at >= $1 AND kind <> ALL($2::text[])`, day, uncountedKinds).Scan(&n); err != nil {
 			return "", fmt.Errorf("limit per day: %w", err)
 		}
 		if n >= l.GlobalPerDay {

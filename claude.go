@@ -197,7 +197,7 @@ func defangPlain(sb *strings.Builder, text string, from, to int) {
 // claudeClient builds the Claude API client with the stored API key. キーが
 // 無い・読めないときは記録に残して errSilent を返す。
 func (b *bot) claudeClient(ctx context.Context, userID, noteID string) (anthropic.Client, error) {
-	key, err := b.pctx.Secrets().Get(ctx, secretAPIKey)
+	client, err := b.newClaudeClient(ctx)
 	if err != nil {
 		switch {
 		case errors.Is(err, plugin.ErrSecretNotSet):
@@ -207,11 +207,21 @@ func (b *bot) claudeClient(ctx context.Context, userID, noteID string) (anthropi
 		case errors.Is(err, plugin.ErrSecretUnreadable):
 			b.logEvent(ctx, "warn", eventConfig, "APIキーを今の鍵で読めません。管理画面から入れ直してください。", userID, noteID)
 		default:
-			return anthropic.Client{}, fmt.Errorf("read api key: %w", err)
+			return anthropic.Client{}, err
 		}
 		return anthropic.Client{}, errSilent
 	}
+	return client, nil
+}
 
+// newClaudeClient is claudeClient without recording why the key is missing.
+// 記憶を選ぶ呼び出し (#31) は、続く返事の呼び出しが同じ理由を記録に残すので、
+// 二重に残さないよう、こちらを使う。
+func (b *bot) newClaudeClient(ctx context.Context) (anthropic.Client, error) {
+	key, err := b.pctx.Secrets().Get(ctx, secretAPIKey)
+	if err != nil {
+		return anthropic.Client{}, fmt.Errorf("read api key: %w", err)
+	}
 	client := anthropic.NewClient(
 		// SDK は既定で ANTHROPIC_API_KEY などの環境変数や ~/.config の
 		// プロファイルを読む。サーバーの環境に別の認証情報があっても、
