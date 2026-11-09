@@ -238,6 +238,18 @@ SPDX-License-Identifier: AGPL-3.0-only
 					<template #label>要約するまでのやり取りの数 (0で要約しない)</template>
 					<template #caption>覚えておく数に10を足した数以上、30を足した数以下(今の覚えておく数なら{{ finite(draft.memory.keepRecent) + 10 }}〜{{ finite(draft.memory.keepRecent) + 30 }})。この数だけたまったら、古い方のやり取りをClaudeに要約させて「この人について」の覚え書きにし、直近の分だけを残します。要約するたびにClaude APIを1回呼びます(予算と1か月のtokenの量に数え、回数の上限には数えません)。要約しないときは、覚えておく数だけを残します。</template>
 				</MkInput>
+				<MkInput v-model="draft.memory.promptChars" type="number" :min="300" :max="6000">
+					<template #label>返事に渡す覚え書きの文字数</template>
+					<template #caption>300〜6000。「この人について」の項目を、この文字数まで返事に渡します(呼び名は別)。選ばないときは新しい項目から渡します。</template>
+				</MkInput>
+				<MkSwitch v-model="draft.memory.select">受け取った投稿に関係する記憶を選んで渡す(試験的)</MkSwitch>
+				<div :class="$style.note">
+					返事の前に、下のモデルに、覚えている項目とやり取りの中から、受け取った投稿に関係するものを選ばせます。呼び名と、今のスレッドに入っていない中で直近のやり取り1件は、選ばれなくても渡します。全部が上の文字数と覚えておく数に収まるときは呼びません。選べなかったとき(エラーや10秒の時間切れ)は、新しい方から渡します。選ぶ呼び出しは予算と1か月のtokenの量に数え、回数の上限には数えません。
+				</div>
+				<MkInput v-if="draft.memory.select" v-model="draft.memory.selectModel">
+					<template #label>記憶を選ぶモデル</template>
+					<template #caption>返事のたびに呼ぶので、安いモデルにしてください(既定はclaude-haiku-5-5)。structured outputsに対応したモデルが要ります。</template>
+				</MkInput>
 			</div>
 		</MkFolder>
 
@@ -449,6 +461,17 @@ SPDX-License-Identifier: AGPL-3.0-only
 									<div v-for="it in itemsOf(a.about, k.kind)" :key="it.id" :class="$style.pre">- {{ it.text }}<span v-if="hasTime(it.at)" :class="$style.note"> ({{ new Date(it.at).toLocaleDateString() }})</span></div>
 								</template>
 							</div>
+							<div v-for="sel in selectionOf(m.userId)" :key="'selection'" :class="$style.message">
+								<div :class="$style.label">直近の返事で使った記憶 ({{ new Date(sel.at).toLocaleString() }}、投稿 {{ sel.noteId }})</div>
+								<div :class="$style.note">
+									<template v-if="!sel.called">全部が収まるので、選ばずに渡しました。</template>
+									<template v-else-if="sel.fallback">選べなかったため、新しい方から渡しました: {{ sel.fallback }}</template>
+									<template v-else>{{ sel.model }}で選びました。</template>
+									<template v-if="!state?.settings.memory.select">(「関係する記憶を選ぶ」がOFFの間と、覚える相手の範囲の外の人では更新しません)</template>
+								</div>
+								<div v-for="it in sel.items" :key="it.id" :class="$style.pre">- {{ it.text }}</div>
+								<div :class="$style.pre">やり取り: {{ sel.exchanges.length > 0 ? sel.exchanges.join('、') : 'なし' }}</div>
+							</div>
 							<div v-for="(ex, i) in memoryDetails[m.userId]?.exchanges ?? []" :key="i" :class="$style.message">
 								<div :class="$style.note">{{ new Date(ex.at).toLocaleString() }} (投稿 {{ ex.noteId }}<template v-if="ex.replyId">、返事 {{ ex.replyId }}</template>)</div>
 								<div :class="$style.pre">相手: {{ ex.user }}</div>
@@ -526,7 +549,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 import { ref, computed, onMounted } from 'vue';
 import { MkInput, MkButton, MkFolder, MkLoading, MkSelect, MkSwitch, MkPluginSecrets } from '@/plugin-api.js';
 import { api, autoMaxTokens, errorMessage, fitAvatar, maxFetchesPerReply, readAsBase64, splitList, totalTokens, usd, webFetchTokensEstimate } from './api.js';
-import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryAboutItem, MemoryResponse, MemorySummary, PeriodUsage, ReversiGame, ReversiGamesResponse, Settings, State } from './api.js';
+import type { BotEvent, EventsResponse, MemoriesResponse, MemoryAbout, MemoryAboutItem, MemoryResponse, MemorySelection, MemorySummary, PeriodUsage, ReversiGame, ReversiGamesResponse, Settings, State } from './api.js';
 
 const state = ref<State | null>(null);
 const events = ref<BotEvent[]>([]);
@@ -724,6 +747,12 @@ function aboutOf(userId: string): { about: MemoryAbout; summarizedAt: string | n
 	return d?.about ? [{ about: d.about, summarizedAt: d.summarizedAt }] : [];
 }
 
+// aboutOf と同じく、0件か1件の配列にして v-for で回す。
+function selectionOf(userId: string): MemorySelection[] {
+	const sel = memoryDetails.value[userId]?.lastSelection;
+	return sel ? [sel] : [];
+}
+
 // 返事に渡すときと同じ区分と順で並べる (memory.go の aboutKinds)。
 const aboutKinds: { kind: MemoryAboutItem['kind']; label: string }[] = [
 	{ kind: 'like', label: '好きなもの・関心' },
@@ -871,6 +900,7 @@ function saveSettings() {
 	r.maxRoundTrips = finite(r.maxRoundTrips);
 	v.maxImages = finite(v.maxImages);
 	d.memory.keepRecent = finite(d.memory.keepRecent);
+	d.memory.promptChars = finite(d.memory.promptChars);
 	// 0は「要約しない」の意味で保存が通るので、空欄を0に寄せると黙って要約が
 	// 止まる。空欄のときは今の値のままにする。
 	const summarizeAt = d.memory.summarizeAt as unknown;

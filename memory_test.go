@@ -515,14 +515,14 @@ func TestRoutes_SaveMemorySettings(t *testing.T) {
 	require.NoError(t, err)
 	s, err := loadSettings(context.Background(), e.db)
 	require.NoError(t, err)
-	assert.Equal(t, MemorySettings{Enabled: true, Audience: "everyone", KeepRecent: 7, SummarizeAt: 20}, s.Memory)
+	assert.Equal(t, MemorySettings{Enabled: true, Audience: "everyone", KeepRecent: 7, SummarizeAt: 20, SelectModel: "claude-haiku-5-5", PromptChars: 1500}, s.Memory)
 
 	// 記憶の項目を知らない古い画面から保存しても、今の値が残る。
 	_, err = r.Call(t, "POST /admin/settings", admin(`{"settings":{"model":"claude-opus-5-5"}}`))
 	require.NoError(t, err)
 	s, err = loadSettings(context.Background(), e.db)
 	require.NoError(t, err)
-	assert.Equal(t, MemorySettings{Enabled: true, Audience: "everyone", KeepRecent: 7, SummarizeAt: 20}, s.Memory)
+	assert.Equal(t, MemorySettings{Enabled: true, Audience: "everyone", KeepRecent: 7, SummarizeAt: 20, SelectModel: "claude-haiku-5-5", PromptChars: 1500}, s.Memory)
 
 	_, err = r.Call(t, "POST /admin/settings", admin(`{"settings":{"memory":{"keepRecent":0}}}`))
 	assert.Equal(t, http.StatusBadRequest, statusOf(t, err))

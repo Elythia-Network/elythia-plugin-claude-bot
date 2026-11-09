@@ -186,4 +186,9 @@ CREATE INDEX reversi_games_created ON reversi_games (created_at);
 -- 印を立てた通知だけが記録を残し、受けられる設定に戻ったら外す。
 ALTER TABLE reversi_games ADD COLUMN paused boolean NOT NULL DEFAULT false;
 `},
+	{Version: 7, SQL: `
+-- 直近の返事で、記憶から何を選んで渡したか (#31)。管理画面で見せる。返事の
+-- たびに書き換えるので、記録 (events) には残さない (一覧を押し流すため)。
+ALTER TABLE memories ADD COLUMN last_selection jsonb;
+`},
 }

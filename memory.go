@@ -191,8 +191,8 @@ func memoryPrompt(mem []exchange, ab *about, who userLite, loc *time.Location, h
 		if ab.CallName != "" {
 			sb.WriteString("呼び名: " + esc(ab.CallName) + "\n")
 		}
-		// 項目は新しい方から予算まで渡し、区分ごとにまとめる (#30)。
-		items := ab.recent(maxAboutPromptChars)
+		// 渡す項目は chooseMemory で決めてある。区分ごとにまとめる (#30)。
+		items := ab.Items
 		for _, kind := range aboutKinds {
 			head := false
 			for _, it := range items {

@@ -82,6 +82,9 @@ export type Settings = {
 		audience: string;
 		keepRecent: number;
 		summarizeAt: number;
+		select: boolean;
+		selectModel: string;
+		promptChars: number;
 	};
 	reversi: {
 		enabled: boolean;
@@ -174,12 +177,27 @@ export type MemoriesResponse = {
 	total: number;
 };
 
+/** What was passed to the last reply when choosing the memories is on. */
+export type MemorySelection = {
+	at: string;
+	noteId: string;
+	/** True when the choosing model was asked. */
+	called: boolean;
+	model: string;
+	/** Why the newest were passed instead. Empty when chosen or not asked. */
+	fallback: string;
+	items: { id: string; text: string }[];
+	/** Notes of the exchanges passed. */
+	exchanges: string[];
+};
+
 /** Response of admin/memories/show (administrators only). */
 export type MemoryResponse = {
 	userId: string;
 	exchanges: MemoryExchange[];
 	about: MemoryAbout | null;
 	summarizedAt: string | null;
+	lastSelection: MemorySelection | null;
 };
 
 /** One reversi game the bot accepted. */
