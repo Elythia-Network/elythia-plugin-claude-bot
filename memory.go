@@ -152,17 +152,7 @@ func recallMemory(ctx context.Context, db *sql.DB, userID string, skip map[strin
 	if err := json.Unmarshal(raw, &all); err != nil {
 		return memoryView{}, fmt.Errorf("%w: %v", errMemoryDecode, err)
 	}
-	// 読めない要約は無かったものとして扱う。やり取りまで使えなくするより良く、
-	// 次の要約で作り直される (claimSummary も同じ扱い)。
-	if len(rawAbout) > 0 && string(rawAbout) != "null" {
-		var ab about
-		if json.Unmarshal(rawAbout, &ab) == nil {
-			ab.clamp()
-			if !ab.empty() {
-				mv.About = &ab
-			}
-		}
-	}
+	mv.About = decodeAbout(rawAbout, mv.SummarizedAt)
 	out := make([]exchange, 0, len(all))
 	for _, ex := range all {
 		if skip[ex.NoteID] {
@@ -201,14 +191,20 @@ func memoryPrompt(mem []exchange, ab *about, who userLite, loc *time.Location, h
 		if ab.CallName != "" {
 			sb.WriteString("呼び名: " + esc(ab.CallName) + "\n")
 		}
-		if len(ab.Likes) > 0 {
-			sb.WriteString("好きなもの・関心: " + esc(strings.Join(ab.Likes, "、")) + "\n")
-		}
-		if len(ab.Topics) > 0 {
-			sb.WriteString("これまでに話した話題: " + esc(strings.Join(ab.Topics, "、")) + "\n")
-		}
-		if ab.Notes != "" {
-			sb.WriteString("メモ: " + esc(ab.Notes) + "\n")
+		// 項目は新しい方から予算まで渡し、区分ごとにまとめる (#30)。
+		items := ab.recent(maxAboutPromptChars)
+		for _, kind := range aboutKinds {
+			head := false
+			for _, it := range items {
+				if it.Kind != kind {
+					continue
+				}
+				if !head {
+					sb.WriteString(aboutKindLabel[kind] + ":\n")
+					head = true
+				}
+				sb.WriteString("- " + esc(it.Text) + "\n")
+			}
 		}
 		sb.WriteString("</about>\n")
 	}
